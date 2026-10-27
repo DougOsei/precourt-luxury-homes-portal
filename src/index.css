@@ -1,0 +1,235 @@
+@import "tailwindcss";
+
+@custom-variant dark {
+  &:where(:root:has(> head > meta[name="color-scheme"][content="dark"]) *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not(:has(> head > meta[name="color-scheme"][content="light"])) *) {
+      @slot;
+    }
+  }
+}
+
+@layer base {
+  :root {
+    --color-bg-light: #f8fafc;
+    --color-bg-dark: #090d16;
+    --color-surface-light: #ffffff;
+    --color-surface-dark: #111827;
+    --color-text-light: #0f172a;
+    --color-text-dark: #f8fafc;
+    --color-accent-light: #059669;
+    --color-accent-dark: #10b981;
+    --scrollbar-track-light: #f1f5f9;
+    --scrollbar-track-dark: #0f172a;
+    --scrollbar-thumb-light: #cbd5e1;
+    --scrollbar-thumb-dark: #334155;
+
+    --color-bg: var(--color-bg-light);
+    --color-surface: var(--color-surface-light);
+    --color-text: var(--color-text-light);
+    --accent-color: var(--color-accent-light);
+    --scrollbar-track: var(--scrollbar-track-light);
+    --scrollbar-thumb: var(--scrollbar-thumb-light);
+
+    @media (prefers-color-scheme: dark) {
+      --color-bg: var(--color-bg-dark);
+      --color-surface: var(--color-surface-dark);
+      --color-text: var(--color-text-dark);
+      --accent-color: var(--color-accent-dark);
+      --scrollbar-track: var(--scrollbar-track-dark);
+      --scrollbar-thumb: var(--scrollbar-thumb-dark);
+    }
+
+    @supports (color: light-dark(white, black)) {
+      --color-bg: light-dark(var(--color-bg-light), var(--color-bg-dark));
+      --color-surface: light-dark(var(--color-surface-light), var(--color-surface-dark));
+      --color-text: light-dark(var(--color-text-light), var(--color-text-dark));
+      --accent-color: light-dark(var(--color-accent-light), var(--color-accent-dark));
+      --scrollbar-track: light-dark(var(--scrollbar-track-light), var(--scrollbar-track-dark));
+      --scrollbar-thumb: light-dark(var(--scrollbar-thumb-light), var(--scrollbar-thumb-dark));
+    }
+
+    color-scheme: light dark;
+    accent-color: var(--accent-color);
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+
+    &:has(> head > meta[name="color-scheme"][content="dark"]) {
+      color-scheme: dark;
+      --color-bg: var(--color-bg-dark);
+      --color-surface: var(--color-surface-dark);
+      --color-text: var(--color-text-dark);
+      --accent-color: var(--color-accent-dark);
+      --scrollbar-track: var(--scrollbar-track-dark);
+      --scrollbar-thumb: var(--scrollbar-thumb-dark);
+    }
+
+    &:has(> head > meta[name="color-scheme"][content="light"]) {
+      color-scheme: light;
+      --color-bg: var(--color-bg-light);
+      --color-surface: var(--color-surface-light);
+      --color-text: var(--color-text-light);
+      --accent-color: var(--color-accent-light);
+      --scrollbar-track: var(--scrollbar-track-light);
+      --scrollbar-thumb: var(--scrollbar-thumb-light);
+    }
+  }
+
+  body {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: var(--color-bg);
+    color: var(--color-text);
+  }
+}
+
+/* Legacy fallback for WebKit/Blink browsers without scrollbar-color */
+@supports not (scrollbar-color: auto) {
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 9999px;
+  }
+}
+
+/* Native Dialog Backdrop Styling (light-dismiss-a-dialog) */
+dialog::backdrop {
+  background-color: rgba(2, 6, 23, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+/* Responsive Data Table (responsive-table guide) */
+.table-wrapper {
+  overflow: auto;
+  max-inline-size: 100%;
+  max-block-size: min(740px, 82vh);
+  container-type: inline-size;
+}
+
+.plh-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+}
+
+.plh-table thead {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 10;
+}
+
+.plh-table tbody th {
+  position: sticky;
+  inset-inline-start: 0;
+  z-index: 5;
+  background-color: var(--color-surface);
+}
+
+@container (width < 640px) {
+  .plh-table,
+  .plh-table thead,
+  .plh-table tbody,
+  .plh-table tr,
+  .plh-table th,
+  .plh-table td {
+    display: block;
+  }
+
+  .plh-table thead {
+    display: none;
+  }
+
+  .plh-table tbody tr {
+    margin-block-end: 1rem;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    border-radius: 0.875rem;
+    overflow: hidden;
+  }
+
+  .plh-table tbody th {
+    position: sticky;
+    inset-block-start: 0;
+    z-index: 6;
+  }
+
+  .plh-table {
+    --label-2: "Unit & Property";
+    --label-3: "Contract Timeline";
+    --label-4: "Rent Details (GHS)";
+    --label-5: "Countdown & Alert";
+    --label-6: "Direct Contact";
+    --label-7: "Actions";
+  }
+
+  .plh-table td {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-block: 0.625rem !important;
+  }
+
+  .plh-table td:nth-child(2)::before {
+    content: var(--label-2) ": ";
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    opacity: 0.65;
+  }
+  .plh-table td:nth-child(3)::before {
+    content: var(--label-3) ": ";
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    opacity: 0.65;
+  }
+  .plh-table td:nth-child(4)::before {
+    content: var(--label-4) ": ";
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    opacity: 0.65;
+  }
+  .plh-table td:nth-child(5)::before {
+    content: var(--label-5) ": ";
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    opacity: 0.65;
+  }
+  .plh-table td:nth-child(6)::before {
+    content: var(--label-6) ": ";
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    opacity: 0.65;
+  }
+  .plh-table td:nth-child(7)::before {
+    content: var(--label-7) ": ";
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    opacity: 0.65;
+  }
+}
+
+/* Print styling for receipts & statements */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  body {
+    background: white !important;
+    color: black !important;
+  }
+}

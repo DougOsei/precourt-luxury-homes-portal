@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Local SQLite database files
+server/*.db
+server/*.db-shm
+server/*.db-wal
+*.sqlite
+*.sqlite3
+
+# Environment & OS files
+.env
+.env.local
+.env.*.local
+.DS_Store
+Thumbs.db
+.vercel/
