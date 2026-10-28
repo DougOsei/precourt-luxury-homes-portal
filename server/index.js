@@ -6,14 +6,101 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const db = require('./database');
 const { seedDatabase } = require('./seed');
+const {
+  applySecurityHeaders,
+  enforceFetchMetadataIsolation,
+  checkRateLimit,
+  resolveSession,
+  requireRole,
+  handleSessionEndpoint,
+  safeErrorResponse,
+  formatZodError,
+  schemas
+} = require('./security');
 
 const app = express();
 const PORT = process.env.PORT || 5050;
 const LOCAL_STATE_FILE = path.join(__dirname, 'portal_state.json');
 const GIST_FILENAME = 'plh_portal_state.json';
 
-app.use(cors());
-app.use(express.json({ limit: '5mb' }));
+// -------------------------------------------------------------
+// PHASE 4 & 5: HTTP SECURITY HEADERS, CORS, PAYLOAD SIZE & RATE LIMITING
+// -------------------------------------------------------------
+app.disable('x-powered-by');
+
+app.use((req, res, next) => {
+  applySecurityHeaders(req, res);
+  next();
+});
+
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
+  })
+);
+
+// Enforce 512 KB max JSON body payload to mitigate DoS (Phase 5)
+app.use(express.json({ limit: '512kb' }));
+
+// Fetch Metadata resource isolation & sliding-window rate limiting on all /api routes
+app.use('/api', (req, res, next) => {
+  if (!enforceFetchMetadataIsolation(req, res)) return;
+
+  const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+  const allowed = checkRateLimit(req, res, {
+    bucket: isMutation ? 'api-write' : 'api-read',
+    maxRequests: isMutation ? 60 : 240,
+    windowMs: 60_000
+  });
+  if (!allowed) return;
+
+  // Enforce server-side RBAC on all state-mutating API endpoints (except /api/auth/session)
+  if (isMutation && !req.path.startsWith('/auth/session')) {
+    const session = requireRole(req, res, ['property_manager']);
+    if (!session) return;
+    req.userSession = session;
+  } else {
+    req.userSession = resolveSession(req, res, { autoIssue: true });
+  }
+
+  next();
+});
+
+// Express route helpers for Zod validation (Phase 2)
+function validateBody(schema) {
+  return (req, res, next) => {
+    const parsed = schema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        ok: false,
+        error: `Validation error: ${formatZodError(parsed.error)}`
+      });
+    }
+    req.validatedBody = parsed.data;
+    next();
+  };
+}
+
+function validateIdParam(req, res, next) {
+  const parsed = schemas.IdParamSchema.safeParse(req.params || {});
+  if (!parsed.success) {
+    return res.status(400).json({
+      ok: false,
+      error: `Invalid route parameter: ${formatZodError(parsed.error)}`
+    });
+  }
+  req.params.id = parsed.data.id;
+  next();
+}
+
+// -------------------------------------------------------------
+// PHASE 3: AUTHENTICATION & RBAC SESSION ENDPOINT
+// -------------------------------------------------------------
+app.all('/api/auth/session', async (req, res) => {
+  await handleSessionEndpoint(req, res);
+});
 
 // -------------------------------------------------------------
 // REAL-TIME CROSS-BROWSER & CLOUD PORTAL STATE SYNC
@@ -66,66 +153,68 @@ app.get('/api/portal-state', async (req, res) => {
     res.json({
       ok: true,
       source: cloudState ? 'cloud+local' : 'local-disk',
+      role: req.userSession?.role || 'property_manager',
       state: resolvedState
     });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    safeErrorResponse(res, err, 'GET /api/portal-state');
   }
 });
 
-app.put('/api/portal-state', async (req, res) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-  const gistId = process.env.PLH_GIST_ID;
-  const githubToken = process.env.PLH_GITHUB_TOKEN;
+app.put(
+  '/api/portal-state',
+  validateBody(schemas.PortalStatePayloadSchema),
+  async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    const gistId = process.env.PLH_GIST_ID;
+    const githubToken = process.env.PLH_GITHUB_TOKEN;
 
-  try {
-    const body = req.body || {};
-    if (!Array.isArray(body.tenants)) {
-      return res.status(400).json({ ok: false, error: 'tenants array required' });
-    }
+    try {
+      const valid = req.validatedBody;
+      const nextState = {
+        tenants: valid.tenants,
+        properties: valid.properties,
+        settings: valid.settings,
+        updatedAt: Number(valid.updatedAt) || Date.now()
+      };
 
-    const nextState = {
-      tenants: body.tenants,
-      properties: body.properties,
-      settings: body.settings,
-      updatedAt: Number(body.updatedAt) || Date.now()
-    };
+      fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(nextState, null, 2), 'utf8');
 
-    fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(nextState, null, 2), 'utf8');
-
-    let syncedCloud = false;
-    if (gistId && githubToken) {
-      try {
-        const gRes = await fetch(`https://api.github.com/gists/${gistId}`, {
-          method: 'PATCH',
-          headers: {
-            Accept: 'application/vnd.github+json',
-            Authorization: `Bearer ${githubToken}`,
-            'Content-Type': 'application/json',
-            'User-Agent': 'Precourt-Luxury-Homes-Portal'
-          },
-          body: JSON.stringify({
-            files: {
-              [GIST_FILENAME]: {
-                content: JSON.stringify(nextState, null, 2)
+      let syncedCloud = false;
+      if (gistId && githubToken) {
+        try {
+          const gRes = await fetch(`https://api.github.com/gists/${gistId}`, {
+            method: 'PATCH',
+            headers: {
+              Accept: 'application/vnd.github+json',
+              Authorization: `Bearer ${githubToken}`,
+              'Content-Type': 'application/json',
+              'User-Agent': 'Precourt-Luxury-Homes-Portal'
+            },
+            body: JSON.stringify({
+              files: {
+                [GIST_FILENAME]: {
+                  content: JSON.stringify(nextState, null, 2)
+                }
               }
-            }
-          })
-        });
-        syncedCloud = gRes.ok;
-      } catch (e) {}
-    }
+            })
+          });
+          syncedCloud = gRes.ok;
+        } catch (e) {}
+      }
 
-    res.json({
-      ok: true,
-      source: syncedCloud ? 'cloud+local' : 'local-disk',
-      updatedAt: nextState.updatedAt,
-      state: nextState
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+      res.json({
+        ok: true,
+        source: syncedCloud ? 'cloud+local' : 'local-disk',
+        role: req.userSession?.role || 'property_manager',
+        updatedAt: nextState.updatedAt,
+        state: nextState
+      });
+    } catch (err) {
+      safeErrorResponse(res, err, 'PUT /api/portal-state');
+    }
   }
-});
+);
 
 // Helper function to format current date
 function getTodayString() {
@@ -139,82 +228,98 @@ function getTodayString() {
 app.get('/api/dashboard/stats', (req, res) => {
   try {
     const today = getTodayString();
-    const currentMonth = today.substring(0, 7); // e.g. '2026-10'
+    const currentMonth = today.substring(0, 7);
 
-    // Properties & Units
     const totalProperties = db.prepare('SELECT COUNT(*) as count FROM properties').get().count;
-    const unitsSummary = db.prepare(`
+    const unitsSummary = db
+      .prepare(`
       SELECT 
         COUNT(*) as total,
         SUM(CASE WHEN status = 'occupied' THEN 1 ELSE 0 END) as occupied,
         SUM(CASE WHEN status = 'vacant' THEN 1 ELSE 0 END) as vacant,
         SUM(CASE WHEN status = 'maintenance' THEN 1 ELSE 0 END) as maintenance
       FROM units
-    `).get();
+    `)
+      .get();
 
-    const occupancyRate = unitsSummary.total > 0 
-      ? Math.round((unitsSummary.occupied / unitsSummary.total) * 100) 
-      : 0;
+    const occupancyRate =
+      unitsSummary.total > 0 ? Math.round((unitsSummary.occupied / unitsSummary.total) * 100) : 0;
 
-    // Active Tenants
-    const activeTenants = db.prepare("SELECT COUNT(*) as count FROM tenants WHERE status = 'active'").get().count;
+    const activeTenants = db
+      .prepare("SELECT COUNT(*) as count FROM tenants WHERE status = 'active'")
+      .get().count;
 
-    // Active Leases
-    const activeLeases = db.prepare("SELECT COUNT(*) as count FROM leases WHERE status IN ('active', 'expiring_soon', 'expired')").get().count;
+    const activeLeases = db
+      .prepare("SELECT COUNT(*) as count FROM leases WHERE status IN ('active', 'expiring_soon', 'expired')")
+      .get().count;
 
-    // Monthly Financials
-    const rentChargedMonth = db.prepare(`
+    const rentChargedMonth = db
+      .prepare(`
       SELECT COALESCE(SUM(amount), 0) as total 
       FROM charges 
       WHERE (period_month = ? OR due_date LIKE ?) AND charge_type = 'rent'
-    `).get(currentMonth, `${currentMonth}%`).total;
+    `)
+      .get(currentMonth, `${currentMonth}%`).total;
 
-    const rentCollectedMonth = db.prepare(`
+    const rentCollectedMonth = db
+      .prepare(`
       SELECT COALESCE(SUM(amount), 0) as total 
       FROM payments 
       WHERE payment_date LIKE ?
-    `).get(`${currentMonth}%`).total;
+    `)
+      .get(`${currentMonth}%`).total;
 
-    // Total outstanding balance across all tenants
-    const totalChargesAllTime = db.prepare('SELECT COALESCE(SUM(amount), 0) as total FROM charges').get().total;
-    const totalPaymentsAllTime = db.prepare('SELECT COALESCE(SUM(amount), 0) as total FROM payments').get().total;
+    const totalChargesAllTime = db
+      .prepare('SELECT COALESCE(SUM(amount), 0) as total FROM charges')
+      .get().total;
+    const totalPaymentsAllTime = db
+      .prepare('SELECT COALESCE(SUM(amount), 0) as total FROM payments')
+      .get().total;
     const totalOutstandingBalance = Math.max(0, totalChargesAllTime - totalPaymentsAllTime);
 
-    // Overdue charges count & sum
-    const overdueStats = db.prepare(`
+    const overdueStats = db
+      .prepare(`
       SELECT 
         COUNT(*) as overdue_count,
         COALESCE(SUM(amount), 0) as overdue_amount
       FROM charges
       WHERE due_date < ? AND status != 'paid'
-    `).get(today);
+    `)
+      .get(today);
 
-    // Maintenance Stats
-    const openMaintenance = db.prepare(`
+    const openMaintenance = db
+      .prepare(`
       SELECT COUNT(*) as count 
       FROM maintenance_requests 
       WHERE status IN ('reported', 'in_progress', 'scheduled')
-    `).get().count;
+    `)
+      .get().count;
 
-    const urgentMaintenance = db.prepare(`
+    const urgentMaintenance = db
+      .prepare(`
       SELECT COUNT(*) as count 
       FROM maintenance_requests 
       WHERE priority = 'urgent' AND status != 'completed' AND status != 'cancelled'
-    `).get().count;
+    `)
+      .get().count;
 
-    const totalMaintenanceCostMonth = db.prepare(`
+    const totalMaintenanceCostMonth = db
+      .prepare(`
       SELECT COALESCE(SUM(CASE WHEN actual_cost > 0 THEN actual_cost ELSE estimated_cost END), 0) as total
       FROM maintenance_requests
       WHERE date_reported LIKE ? OR date_completed LIKE ?
-    `).get(`${currentMonth}%`, `${currentMonth}%`).total;
+    `)
+      .get(`${currentMonth}%`, `${currentMonth}%`).total;
 
-    const totalMaintenanceCostAllTime = db.prepare(`
+    const totalMaintenanceCostAllTime = db
+      .prepare(`
       SELECT COALESCE(SUM(CASE WHEN actual_cost > 0 THEN actual_cost ELSE estimated_cost END), 0) as total
       FROM maintenance_requests
-    `).get().total;
+    `)
+      .get().total;
 
-    // Upcoming Lease Expirations (Next 90 days)
-    const upcomingExpirations = db.prepare(`
+    const upcomingExpirations = db
+      .prepare(`
       SELECT 
         l.id as lease_id,
         l.start_date,
@@ -234,10 +339,11 @@ app.get('/api/dashboard/stats', (req, res) => {
       WHERE l.status IN ('active', 'expiring_soon', 'expired') AND l.end_date <= date(?, '+90 days')
       ORDER BY l.end_date ASC
       LIMIT 6
-    `).all(today, today);
+    `)
+      .all(today, today);
 
-    // Recent Payments
-    const recentPayments = db.prepare(`
+    const recentPayments = db
+      .prepare(`
       SELECT 
         p.id,
         p.amount,
@@ -254,10 +360,11 @@ app.get('/api/dashboard/stats', (req, res) => {
       JOIN properties pr ON u.property_id = pr.id
       ORDER BY p.payment_date DESC, p.created_at DESC
       LIMIT 5
-    `).all();
+    `)
+      .all();
 
-    // Urgent / Open Maintenance
-    const urgentTickets = db.prepare(`
+    const urgentTickets = db
+      .prepare(`
       SELECT 
         m.id,
         m.title,
@@ -281,7 +388,8 @@ app.get('/api/dashboard/stats', (req, res) => {
         END,
         m.date_reported DESC
       LIMIT 5
-    `).all();
+    `)
+      .all();
 
     res.json({
       properties: {
@@ -299,7 +407,8 @@ app.get('/api/dashboard/stats', (req, res) => {
       finances: {
         rentChargedMonth,
         rentCollectedMonth,
-        collectionRate: rentChargedMonth > 0 ? Math.round((rentCollectedMonth / rentChargedMonth) * 100) : 100,
+        collectionRate:
+          rentChargedMonth > 0 ? Math.round((rentCollectedMonth / rentChargedMonth) * 100) : 100,
         totalOutstandingBalance,
         overdueCount: overdueStats.overdue_count,
         overdueAmount: overdueStats.overdue_amount
@@ -315,8 +424,7 @@ app.get('/api/dashboard/stats', (req, res) => {
       urgentTickets
     });
   } catch (err) {
-    console.error('Error fetching dashboard stats:', err);
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/dashboard/stats');
   }
 });
 
@@ -325,7 +433,8 @@ app.get('/api/dashboard/stats', (req, res) => {
 // -------------------------------------------------------------
 app.get('/api/properties', (req, res) => {
   try {
-    const properties = db.prepare(`
+    const properties = db
+      .prepare(`
       SELECT 
         p.*,
         COUNT(u.id) as total_units,
@@ -337,20 +446,22 @@ app.get('/api/properties', (req, res) => {
       LEFT JOIN units u ON p.id = u.property_id
       GROUP BY p.id
       ORDER BY p.name ASC
-    `).all();
+    `)
+      .all();
 
     res.json(properties);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/properties');
   }
 });
 
-app.get('/api/properties/:id', (req, res) => {
+app.get('/api/properties/:id', validateIdParam, (req, res) => {
   try {
     const property = db.prepare('SELECT * FROM properties WHERE id = ?').get(req.params.id);
     if (!property) return res.status(404).json({ error: 'Property not found' });
 
-    const units = db.prepare(`
+    const units = db
+      .prepare(`
       SELECT 
         u.*,
         l.id as active_lease_id,
@@ -366,64 +477,111 @@ app.get('/api/properties/:id', (req, res) => {
       LEFT JOIN tenants t ON l.tenant_id = t.id
       WHERE u.property_id = ?
       ORDER BY u.unit_number ASC
-    `).all(req.params.id);
+    `)
+      .all(req.params.id);
 
-    const maintenance = db.prepare(`
+    const maintenance = db
+      .prepare(`
       SELECT m.*, u.unit_number
       FROM maintenance_requests m
       LEFT JOIN units u ON m.unit_id = u.id
       WHERE m.property_id = ?
       ORDER BY m.date_reported DESC
-    `).all(req.params.id);
+    `)
+      .all(req.params.id);
 
     res.json({ ...property, units, maintenance });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/properties/:id');
   }
 });
 
-app.post('/api/properties', (req, res) => {
+app.post('/api/properties', validateBody(schemas.SqlPropertySchema), (req, res) => {
   try {
-    const { name, address, city, state, zip_code, property_type, year_built, image_url, description } = req.body;
-    if (!name || !address || !city || !state || !zip_code) {
-      return res.status(400).json({ error: 'Please provide all required fields (name, address, city, state, zip_code)' });
-    }
+    const {
+      name,
+      address,
+      city,
+      state,
+      zip_code,
+      property_type,
+      year_built,
+      image_url,
+      description
+    } = req.validatedBody;
 
     const id = `prop-${uuidv4().substring(0, 8)}`;
     db.prepare(`
       INSERT INTO properties (id, name, address, city, state, zip_code, property_type, year_built, image_url, description)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, name, address, city, state, zip_code, property_type || 'Apartment Complex', year_built || null, image_url || null, description || null);
+    `).run(
+      id,
+      name,
+      address,
+      city,
+      state,
+      zip_code,
+      property_type || 'Apartment Complex',
+      year_built || null,
+      image_url || null,
+      description || null
+    );
 
     const created = db.prepare('SELECT * FROM properties WHERE id = ?').get(id);
     res.status(201).json(created);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'POST /api/properties');
   }
 });
 
-app.put('/api/properties/:id', (req, res) => {
-  try {
-    const { name, address, city, state, zip_code, property_type, year_built, image_url, description } = req.body;
-    db.prepare(`
+app.put(
+  '/api/properties/:id',
+  validateIdParam,
+  validateBody(schemas.SqlPropertySchema),
+  (req, res) => {
+    try {
+      const {
+        name,
+        address,
+        city,
+        state,
+        zip_code,
+        property_type,
+        year_built,
+        image_url,
+        description
+      } = req.validatedBody;
+      db.prepare(`
       UPDATE properties
       SET name = ?, address = ?, city = ?, state = ?, zip_code = ?, property_type = ?, year_built = ?, image_url = ?, description = ?
       WHERE id = ?
-    `).run(name, address, city, state, zip_code, property_type, year_built, image_url, description, req.params.id);
+    `).run(
+        name,
+        address,
+        city,
+        state,
+        zip_code,
+        property_type || 'Apartment Complex',
+        year_built || null,
+        image_url || null,
+        description || null,
+        req.params.id
+      );
 
-    const updated = db.prepare('SELECT * FROM properties WHERE id = ?').get(req.params.id);
-    res.json(updated);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+      const updated = db.prepare('SELECT * FROM properties WHERE id = ?').get(req.params.id);
+      res.json(updated);
+    } catch (err) {
+      safeErrorResponse(res, err, 'PUT /api/properties/:id');
+    }
   }
-});
+);
 
-app.delete('/api/properties/:id', (req, res) => {
+app.delete('/api/properties/:id', validateIdParam, (req, res) => {
   try {
     db.prepare('DELETE FROM properties WHERE id = ?').run(req.params.id);
     res.json({ success: true, message: 'Property deleted' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'DELETE /api/properties/:id');
   }
 });
 
@@ -432,6 +590,12 @@ app.delete('/api/properties/:id', (req, res) => {
 // -------------------------------------------------------------
 app.get('/api/units', (req, res) => {
   try {
+    const queryCheck = schemas.SqlUnitQuerySchema.safeParse(req.query || {});
+    if (!queryCheck.success) {
+      return res.status(400).json({ ok: false, error: formatZodError(queryCheck.error) });
+    }
+    const validQuery = queryCheck.data;
+
     let query = `
       SELECT 
         u.*,
@@ -452,13 +616,13 @@ app.get('/api/units', (req, res) => {
     const params = [];
     const conditions = [];
 
-    if (req.query.property_id) {
+    if (validQuery.property_id) {
       conditions.push('u.property_id = ?');
-      params.push(req.query.property_id);
+      params.push(validQuery.property_id);
     }
-    if (req.query.status) {
+    if (validQuery.status) {
       conditions.push('u.status = ?');
-      params.push(req.query.status);
+      params.push(validQuery.status);
     }
 
     if (conditions.length > 0) {
@@ -469,58 +633,99 @@ app.get('/api/units', (req, res) => {
     const units = db.prepare(query).all(...params);
     res.json(units);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/units');
   }
 });
 
-app.post('/api/units', (req, res) => {
+app.post('/api/units', validateBody(schemas.SqlUnitSchema), (req, res) => {
   try {
-    const { property_id, unit_number, floor, bedrooms, bathrooms, square_feet, market_rent, status, features } = req.body;
-    if (!property_id || !unit_number || market_rent === undefined) {
-      return res.status(400).json({ error: 'Property, unit number, and market rent are required' });
-    }
+    const {
+      property_id,
+      unit_number,
+      floor,
+      bedrooms,
+      bathrooms,
+      square_feet,
+      market_rent,
+      status,
+      features
+    } = req.validatedBody;
 
     const id = `unit-${uuidv4().substring(0, 8)}`;
     db.prepare(`
       INSERT INTO units (id, property_id, unit_number, floor, bedrooms, bathrooms, square_feet, market_rent, status, features)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, property_id, unit_number, floor || 1, bedrooms || 1, bathrooms || 1.0, square_feet || null, market_rent, status || 'vacant', features || '');
+    `).run(
+      id,
+      property_id,
+      unit_number,
+      floor || 1,
+      bedrooms || 1,
+      bathrooms || 1.0,
+      square_feet || null,
+      market_rent,
+      status || 'vacant',
+      features || ''
+    );
 
-    const created = db.prepare(`
+    const created = db
+      .prepare(`
       SELECT u.*, p.name as property_name 
       FROM units u 
       JOIN properties p ON u.property_id = p.id 
       WHERE u.id = ?
-    `).get(id);
+    `)
+      .get(id);
 
     res.status(201).json(created);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'POST /api/units');
   }
 });
 
-app.put('/api/units/:id', (req, res) => {
+app.put('/api/units/:id', validateIdParam, validateBody(schemas.SqlUnitSchema), (req, res) => {
   try {
-    const { property_id, unit_number, floor, bedrooms, bathrooms, square_feet, market_rent, status, features } = req.body;
+    const {
+      property_id,
+      unit_number,
+      floor,
+      bedrooms,
+      bathrooms,
+      square_feet,
+      market_rent,
+      status,
+      features
+    } = req.validatedBody;
     db.prepare(`
       UPDATE units
       SET property_id = ?, unit_number = ?, floor = ?, bedrooms = ?, bathrooms = ?, square_feet = ?, market_rent = ?, status = ?, features = ?
       WHERE id = ?
-    `).run(property_id, unit_number, floor, bedrooms, bathrooms, square_feet, market_rent, status, features, req.params.id);
+    `).run(
+      property_id,
+      unit_number,
+      floor,
+      bedrooms,
+      bathrooms,
+      square_feet,
+      market_rent,
+      status,
+      features,
+      req.params.id
+    );
 
     const updated = db.prepare('SELECT * FROM units WHERE id = ?').get(req.params.id);
     res.json(updated);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'PUT /api/units/:id');
   }
 });
 
-app.delete('/api/units/:id', (req, res) => {
+app.delete('/api/units/:id', validateIdParam, (req, res) => {
   try {
     db.prepare('DELETE FROM units WHERE id = ?').run(req.params.id);
     res.json({ success: true, message: 'Unit deleted' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'DELETE /api/units/:id');
   }
 });
 
@@ -529,7 +734,8 @@ app.delete('/api/units/:id', (req, res) => {
 // -------------------------------------------------------------
 app.get('/api/tenants', (req, res) => {
   try {
-    const tenants = db.prepare(`
+    const tenants = db
+      .prepare(`
       SELECT 
         t.*,
         l.id as lease_id,
@@ -549,44 +755,53 @@ app.get('/api/tenants', (req, res) => {
       LEFT JOIN units u ON l.unit_id = u.id
       LEFT JOIN properties p ON u.property_id = p.id
       ORDER BY t.id ASC
-    `).all();
+    `)
+      .all();
 
     res.json(tenants);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/tenants');
   }
 });
 
-app.get('/api/tenants/:id', (req, res) => {
+app.get('/api/tenants/:id', validateIdParam, (req, res) => {
   try {
     const tenant = db.prepare('SELECT * FROM tenants WHERE id = ?').get(req.params.id);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
 
-    const leases = db.prepare(`
+    const leases = db
+      .prepare(`
       SELECT l.*, u.unit_number, p.name as property_name
       FROM leases l
       JOIN units u ON l.unit_id = u.id
       JOIN properties p ON u.property_id = p.id
       WHERE l.tenant_id = ?
       ORDER BY l.start_date DESC
-    `).all(req.params.id);
+    `)
+      .all(req.params.id);
 
-    const charges = db.prepare(`
+    const charges = db
+      .prepare(`
       SELECT * FROM charges WHERE tenant_id = ? ORDER BY due_date DESC
-    `).all(req.params.id);
+    `)
+      .all(req.params.id);
 
-    const payments = db.prepare(`
+    const payments = db
+      .prepare(`
       SELECT * FROM payments WHERE tenant_id = ? ORDER BY payment_date DESC
-    `).all(req.params.id);
+    `)
+      .all(req.params.id);
 
-    const maintenance = db.prepare(`
+    const maintenance = db
+      .prepare(`
       SELECT m.*, u.unit_number, p.name as property_name
       FROM maintenance_requests m
       JOIN properties p ON m.property_id = p.id
       LEFT JOIN units u ON m.unit_id = u.id
       WHERE m.tenant_id = ?
       ORDER BY m.date_reported DESC
-    `).all(req.params.id);
+    `)
+      .all(req.params.id);
 
     const totalCharged = charges.reduce((acc, c) => acc + c.amount, 0);
     const totalPaid = payments.reduce((acc, p) => acc + p.amount, 0);
@@ -603,54 +818,116 @@ app.get('/api/tenants/:id', (req, res) => {
       maintenance
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/tenants/:id');
   }
 });
 
-app.post('/api/tenants', (req, res) => {
+app.post('/api/tenants', validateBody(schemas.SqlTenantSchema), (req, res) => {
   try {
-    const { first_name, last_name, email, phone, whatsapp, national_id, emergency_contact_name, emergency_contact_phone, emergency_contact_relation, employer, monthly_income, status, notes } = req.body;
-    if (!first_name || !last_name || !phone) {
-      return res.status(400).json({ error: 'First name, last name, and phone are required' });
-    }
+    const {
+      first_name,
+      last_name,
+      email,
+      phone,
+      whatsapp,
+      national_id,
+      emergency_contact_name,
+      emergency_contact_phone,
+      emergency_contact_relation,
+      employer,
+      monthly_income,
+      status,
+      notes
+    } = req.validatedBody;
 
     const id = `PLH-${Math.floor(100 + Math.random() * 900)}`;
-    const finalEmail = email || `${first_name.toLowerCase()}.${last_name.toLowerCase().replace(/[^a-z]/g, '')}@example.com`;
+    const finalEmail =
+      email ||
+      `${first_name.toLowerCase()}.${last_name.toLowerCase().replace(/[^a-z]/g, '')}@example.com`;
 
     db.prepare(`
       INSERT INTO tenants (id, first_name, last_name, email, phone, whatsapp, national_id, emergency_contact_name, emergency_contact_phone, emergency_contact_relation, employer, monthly_income, status, notes)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, first_name, last_name, finalEmail, phone, whatsapp || phone, national_id || null, emergency_contact_name || null, emergency_contact_phone || null, emergency_contact_relation || null, employer || null, monthly_income || null, status || 'active', notes || null);
+    `).run(
+      id,
+      first_name,
+      last_name,
+      finalEmail,
+      phone,
+      whatsapp || phone,
+      national_id || null,
+      emergency_contact_name || null,
+      emergency_contact_phone || null,
+      emergency_contact_relation || null,
+      employer || null,
+      monthly_income || null,
+      status || 'active',
+      notes || null
+    );
 
     const created = db.prepare('SELECT * FROM tenants WHERE id = ?').get(id);
     res.status(201).json(created);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'POST /api/tenants');
   }
 });
 
-app.put('/api/tenants/:id', (req, res) => {
-  try {
-    const { first_name, last_name, email, phone, whatsapp, national_id, emergency_contact_name, emergency_contact_phone, emergency_contact_relation, employer, monthly_income, status, notes } = req.body;
-    db.prepare(`
+app.put(
+  '/api/tenants/:id',
+  validateIdParam,
+  validateBody(schemas.SqlTenantSchema),
+  (req, res) => {
+    try {
+      const {
+        first_name,
+        last_name,
+        email,
+        phone,
+        whatsapp,
+        national_id,
+        emergency_contact_name,
+        emergency_contact_phone,
+        emergency_contact_relation,
+        employer,
+        monthly_income,
+        status,
+        notes
+      } = req.validatedBody;
+      db.prepare(`
       UPDATE tenants
       SET first_name = ?, last_name = ?, email = ?, phone = ?, whatsapp = ?, national_id = ?, emergency_contact_name = ?, emergency_contact_phone = ?, emergency_contact_relation = ?, employer = ?, monthly_income = ?, status = ?, notes = ?
       WHERE id = ?
-    `).run(first_name, last_name, email, phone, whatsapp || phone, national_id, emergency_contact_name, emergency_contact_phone, emergency_contact_relation, employer, monthly_income, status, notes, req.params.id);
+    `).run(
+        first_name,
+        last_name,
+        email,
+        phone,
+        whatsapp || phone,
+        national_id,
+        emergency_contact_name,
+        emergency_contact_phone,
+        emergency_contact_relation,
+        employer,
+        monthly_income,
+        status,
+        notes,
+        req.params.id
+      );
 
-    const updated = db.prepare('SELECT * FROM tenants WHERE id = ?').get(req.params.id);
-    res.json(updated);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+      const updated = db.prepare('SELECT * FROM tenants WHERE id = ?').get(req.params.id);
+      res.json(updated);
+    } catch (err) {
+      safeErrorResponse(res, err, 'PUT /api/tenants/:id');
+    }
   }
-});
+);
 
-app.delete('/api/tenants/:id', (req, res) => {
+app.delete('/api/tenants/:id', validateIdParam, (req, res) => {
   try {
     db.prepare('DELETE FROM tenants WHERE id = ?').run(req.params.id);
     res.json({ success: true, message: 'Tenant deleted' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'DELETE /api/tenants/:id');
   }
 });
 
@@ -660,7 +937,8 @@ app.delete('/api/tenants/:id', (req, res) => {
 app.get('/api/leases', (req, res) => {
   try {
     const today = getTodayString();
-    const leases = db.prepare(`
+    const leases = db
+      .prepare(`
       SELECT 
         l.*,
         t.first_name || ' ' || t.last_name as tenant_name,
@@ -677,7 +955,7 @@ app.get('/api/leases', (req, res) => {
         CASE
           WHEN l.status = 'terminated' THEN 'terminated'
           WHEN l.end_date < ? THEN 'expired'
-          WHEN (julianday(l.end_date) - julianday(?)) <= 60 THEN 'expiring_soon'
+          WHEN (julianday(l.end_date) - julianday(?)) <= 90 THEN 'expiring_soon'
           WHEN l.start_date > ? THEN 'pending'
           ELSE 'active'
         END as calculated_status
@@ -688,135 +966,200 @@ app.get('/api/leases', (req, res) => {
       ORDER BY 
         CASE WHEN l.status = 'active' THEN 1 ELSE 2 END,
         l.end_date ASC
-    `).all(today, today, today, today);
+    `)
+      .all(today, today, today, today);
 
     res.json(leases);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/leases');
   }
 });
 
-app.post('/api/leases', (req, res) => {
+app.post('/api/leases', validateBody(schemas.SqlLeaseCreateSchema), (req, res) => {
   try {
-    const { tenant_id, unit_id, start_date, end_date, monthly_rent, security_deposit, duration_months, total_contract_value, rent_due_day, terms, generate_first_month_rent } = req.body;
-    if (!tenant_id || !unit_id || !start_date || !end_date || monthly_rent === undefined) {
-      return res.status(400).json({ error: 'Tenant, unit, start date, end date, and monthly rent are required' });
-    }
+    const {
+      tenant_id,
+      unit_id,
+      start_date,
+      end_date,
+      monthly_rent,
+      security_deposit,
+      duration_months,
+      total_contract_value,
+      rent_due_day,
+      terms,
+      generate_first_month_rent
+    } = req.validatedBody;
 
     const leaseId = `lease-${uuidv4().substring(0, 8)}`;
-    const deposit = security_deposit !== undefined ? Number(security_deposit) : Number(monthly_rent);
+    const deposit =
+      security_deposit !== undefined ? Number(security_deposit) : Number(monthly_rent);
     const months = duration_months ? Number(duration_months) : 12;
-    const totalContract = total_contract_value ? Number(total_contract_value) : (Number(monthly_rent) * months);
+    const totalContract = total_contract_value
+      ? Number(total_contract_value)
+      : Number(monthly_rent) * months;
 
     const transaction = db.transaction(() => {
-      // 1. Create lease
       db.prepare(`
         INSERT INTO leases (id, tenant_id, unit_id, start_date, end_date, monthly_rent, security_deposit, duration_months, total_contract_value, rent_due_day, status, terms)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
-      `).run(leaseId, tenant_id, unit_id, start_date, end_date, monthly_rent, deposit, months, totalContract, rent_due_day || 1, terms || null);
+      `).run(
+        leaseId,
+        tenant_id,
+        unit_id,
+        start_date,
+        end_date,
+        monthly_rent,
+        deposit,
+        months,
+        totalContract,
+        rent_due_day || 1,
+        terms || null
+      );
 
-      // 2. Set unit status to occupied
       db.prepare("UPDATE units SET status = 'occupied' WHERE id = ?").run(unit_id);
-
-      // 3. Set tenant status to active
       db.prepare("UPDATE tenants SET status = 'active' WHERE id = ?").run(tenant_id);
 
-      // 4. Optionally generate initial rent charge
       if (generate_first_month_rent !== false) {
         const startMonth = start_date.substring(0, 7);
         const chgId = `chg-${uuidv4().substring(0, 8)}`;
         db.prepare(`
           INSERT INTO charges (id, lease_id, tenant_id, charge_type, description, amount, due_date, period_month, status)
           VALUES (?, ?, ?, 'rent', ?, ?, ?, ?, 'unpaid')
-        `).run(chgId, leaseId, tenant_id, `Advance Rent (${months} Months)`, totalContract, start_date, startMonth);
+        `).run(
+          chgId,
+          leaseId,
+          tenant_id,
+          `Advance Rent (${months} Months)`,
+          totalContract,
+          start_date,
+          startMonth
+        );
       }
     });
 
     transaction();
 
-    const created = db.prepare(`
+    const created = db
+      .prepare(`
       SELECT l.*, t.first_name || ' ' || t.last_name as tenant_name, u.unit_number, p.name as property_name
       FROM leases l
       JOIN tenants t ON l.tenant_id = t.id
       JOIN units u ON l.unit_id = u.id
       JOIN properties p ON u.property_id = p.id
       WHERE l.id = ?
-    `).get(leaseId);
+    `)
+      .get(leaseId);
 
     res.status(201).json(created);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'POST /api/leases');
   }
 });
 
-app.put('/api/leases/:id', (req, res) => {
-  try {
-    const { start_date, end_date, monthly_rent, security_deposit, rent_due_day, status, terms } = req.body;
-    db.prepare(`
+app.put(
+  '/api/leases/:id',
+  validateIdParam,
+  validateBody(schemas.SqlLeaseUpdateSchema),
+  (req, res) => {
+    try {
+      const {
+        start_date,
+        end_date,
+        monthly_rent,
+        security_deposit,
+        rent_due_day,
+        status,
+        terms
+      } = req.validatedBody;
+      db.prepare(`
       UPDATE leases
       SET start_date = ?, end_date = ?, monthly_rent = ?, security_deposit = ?, rent_due_day = ?, status = ?, terms = ?
       WHERE id = ?
-    `).run(start_date, end_date, monthly_rent, security_deposit, rent_due_day, status, terms, req.params.id);
+    `).run(
+        start_date,
+        end_date,
+        monthly_rent,
+        security_deposit,
+        rent_due_day,
+        status,
+        terms,
+        req.params.id
+      );
 
-    const updated = db.prepare('SELECT * FROM leases WHERE id = ?').get(req.params.id);
-    res.json(updated);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+      const updated = db.prepare('SELECT * FROM leases WHERE id = ?').get(req.params.id);
+      res.json(updated);
+    } catch (err) {
+      safeErrorResponse(res, err, 'PUT /api/leases/:id');
+    }
   }
-});
+);
 
-// Terminate lease
-app.post('/api/leases/:id/terminate', (req, res) => {
-  try {
-    const { termination_date, unit_status_after } = req.body;
-    const lease = db.prepare('SELECT * FROM leases WHERE id = ?').get(req.params.id);
-    if (!lease) return res.status(404).json({ error: 'Lease not found' });
+app.post(
+  '/api/leases/:id/terminate',
+  validateIdParam,
+  validateBody(schemas.SqlLeaseTerminateSchema),
+  (req, res) => {
+    try {
+      const { termination_date, unit_status_after } = req.validatedBody;
+      const lease = db.prepare('SELECT * FROM leases WHERE id = ?').get(req.params.id);
+      if (!lease) return res.status(404).json({ error: 'Lease not found' });
 
-    const transaction = db.transaction(() => {
-      db.prepare(`
+      const transaction = db.transaction(() => {
+        db.prepare(`
         UPDATE leases 
         SET status = 'terminated', end_date = COALESCE(?, end_date) 
         WHERE id = ?
       `).run(termination_date || getTodayString(), req.params.id);
 
-      // Free unit
-      db.prepare('UPDATE units SET status = ? WHERE id = ?').run(unit_status_after || 'vacant', lease.unit_id);
-    });
+        db.prepare('UPDATE units SET status = ? WHERE id = ?').run(
+          unit_status_after || 'vacant',
+          lease.unit_id
+        );
+      });
 
-    transaction();
-    res.json({ success: true, message: 'Lease terminated and unit status updated' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+      transaction();
+      res.json({ success: true, message: 'Lease terminated and unit status updated' });
+    } catch (err) {
+      safeErrorResponse(res, err, 'POST /api/leases/:id/terminate');
+    }
   }
-});
+);
 
-// Renew lease
-app.post('/api/leases/:id/renew', (req, res) => {
-  try {
-    const { new_end_date, new_monthly_rent, terms } = req.body;
-    const oldLease = db.prepare('SELECT * FROM leases WHERE id = ?').get(req.params.id);
-    if (!oldLease) return res.status(404).json({ error: 'Lease not found' });
+app.post(
+  '/api/leases/:id/renew',
+  validateIdParam,
+  validateBody(schemas.SqlLeaseRenewSchema),
+  (req, res) => {
+    try {
+      const { new_end_date, new_monthly_rent, terms } = req.validatedBody;
+      const oldLease = db.prepare('SELECT * FROM leases WHERE id = ?').get(req.params.id);
+      if (!oldLease) return res.status(404).json({ error: 'Lease not found' });
 
-    const newRent = new_monthly_rent !== undefined ? Number(new_monthly_rent) : oldLease.monthly_rent;
-    db.prepare(`
+      const newRent =
+        new_monthly_rent !== undefined ? Number(new_monthly_rent) : oldLease.monthly_rent;
+
+      db.prepare(`
       UPDATE leases
       SET end_date = ?, monthly_rent = ?, status = 'active', terms = COALESCE(?, terms)
       WHERE id = ?
     `).run(new_end_date, newRent, terms, req.params.id);
 
-    const renewed = db.prepare('SELECT * FROM leases WHERE id = ?').get(req.params.id);
-    res.json(renewed);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+      const renewed = db.prepare('SELECT * FROM leases WHERE id = ?').get(req.params.id);
+      res.json(renewed);
+    } catch (err) {
+      safeErrorResponse(res, err, 'POST /api/leases/:id/renew');
+    }
   }
-});
+);
 
 // -------------------------------------------------------------
 // RENT PAYMENTS, CHARGES & BALANCES API
 // -------------------------------------------------------------
 app.get('/api/finances/balances', (req, res) => {
   try {
-    const balances = db.prepare(`
+    const balances = db
+      .prepare(`
       SELECT 
         t.id as tenant_id,
         t.first_name || ' ' || t.last_name as tenant_name,
@@ -846,17 +1189,19 @@ app.get('/api/finances/balances', (req, res) => {
         GROUP BY tenant_id
       ) pay ON t.id = pay.tenant_id
       ORDER BY balance DESC, t.last_name ASC
-    `).all();
+    `)
+      .all();
 
     res.json(balances);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/finances/balances');
   }
 });
 
 app.get('/api/finances/charges', (req, res) => {
   try {
-    const charges = db.prepare(`
+    const charges = db
+      .prepare(`
       SELECT 
         c.*,
         t.first_name || ' ' || t.last_name as tenant_name,
@@ -868,78 +1213,103 @@ app.get('/api/finances/charges', (req, res) => {
       JOIN units u ON l.unit_id = u.id
       JOIN properties p ON u.property_id = p.id
       ORDER BY c.due_date DESC, c.created_at DESC
-    `).all();
+    `)
+      .all();
 
     res.json(charges);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/finances/charges');
   }
 });
 
-app.post('/api/finances/charges', (req, res) => {
-  try {
-    const { lease_id, charge_type, description, amount, due_date, period_month } = req.body;
-    if (!lease_id || !description || amount === undefined || !due_date) {
-      return res.status(400).json({ error: 'Lease, description, amount, and due date are required' });
-    }
+app.post(
+  '/api/finances/charges',
+  validateBody(schemas.SqlChargeCreateSchema),
+  (req, res) => {
+    try {
+      const { lease_id, charge_type, description, amount, due_date, period_month } =
+        req.validatedBody;
 
-    const lease = db.prepare('SELECT tenant_id FROM leases WHERE id = ?').get(lease_id);
-    if (!lease) return res.status(404).json({ error: 'Lease not found' });
+      const lease = db.prepare('SELECT tenant_id FROM leases WHERE id = ?').get(lease_id);
+      if (!lease) return res.status(404).json({ error: 'Lease not found' });
 
-    const id = `chg-${uuidv4().substring(0, 8)}`;
-    db.prepare(`
+      const id = `chg-${uuidv4().substring(0, 8)}`;
+      db.prepare(`
       INSERT INTO charges (id, lease_id, tenant_id, charge_type, description, amount, due_date, period_month, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unpaid')
-    `).run(id, lease_id, lease.tenant_id, charge_type || 'rent', description, amount, due_date, period_month || due_date.substring(0, 7));
+    `).run(
+        id,
+        lease_id,
+        lease.tenant_id,
+        charge_type || 'rent',
+        description,
+        amount,
+        due_date,
+        period_month || due_date.substring(0, 7)
+      );
 
-    const created = db.prepare('SELECT * FROM charges WHERE id = ?').get(id);
-    res.status(201).json(created);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+      const created = db.prepare('SELECT * FROM charges WHERE id = ?').get(id);
+      res.status(201).json(created);
+    } catch (err) {
+      safeErrorResponse(res, err, 'POST /api/finances/charges');
+    }
   }
-});
+);
 
-// Auto generate monthly rent charges for all active leases for a given month
-app.post('/api/finances/generate-monthly-charges', (req, res) => {
-  try {
-    const { month } = req.body; // e.g. "2026-11"
-    const targetMonth = month || getTodayString().substring(0, 7);
+app.post(
+  '/api/finances/generate-monthly-charges',
+  validateBody(schemas.SqlGenerateChargesSchema),
+  (req, res) => {
+    try {
+      const { month } = req.validatedBody;
+      const targetMonth = month || getTodayString().substring(0, 7);
 
-    const activeLeases = db.prepare("SELECT * FROM leases WHERE status = 'active'").all();
-    let generatedCount = 0;
+      const activeLeases = db.prepare("SELECT * FROM leases WHERE status = 'active'").all();
+      let generatedCount = 0;
 
-    const transaction = db.transaction(() => {
-      activeLeases.forEach(lease => {
-        // Check if charge already exists for this lease and month
-        const existing = db.prepare(`
+      const transaction = db.transaction(() => {
+        activeLeases.forEach((lease) => {
+          const existing = db
+            .prepare(`
           SELECT id FROM charges 
           WHERE lease_id = ? AND period_month = ? AND charge_type = 'rent'
-        `).get(lease.id, targetMonth);
+        `)
+            .get(lease.id, targetMonth);
 
-        if (!existing) {
-          const chgId = `chg-${uuidv4().substring(0, 8)}`;
-          const dueDayPadded = String(lease.rent_due_day || 1).padStart(2, '0');
-          const dueDate = `${targetMonth}-${dueDayPadded}`;
+          if (!existing) {
+            const chgId = `chg-${uuidv4().substring(0, 8)}`;
+            const dueDayPadded = String(lease.rent_due_day || 1).padStart(2, '0');
+            const dueDate = `${targetMonth}-${dueDayPadded}`;
 
-          db.prepare(`
+            db.prepare(`
             INSERT INTO charges (id, lease_id, tenant_id, charge_type, description, amount, due_date, period_month, status)
             VALUES (?, ?, ?, 'rent', ?, ?, ?, ?, 'unpaid')
-          `).run(chgId, lease.id, lease.tenant_id, `Rent - ${targetMonth}`, lease.monthly_rent, dueDate, targetMonth);
-          generatedCount++;
-        }
+          `).run(
+              chgId,
+              lease.id,
+              lease.tenant_id,
+              `Rent - ${targetMonth}`,
+              lease.monthly_rent,
+              dueDate,
+              targetMonth
+            );
+            generatedCount++;
+          }
+        });
       });
-    });
 
-    transaction();
-    res.json({ success: true, generatedCount, month: targetMonth });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+      transaction();
+      res.json({ success: true, generatedCount, month: targetMonth });
+    } catch (err) {
+      safeErrorResponse(res, err, 'POST /api/finances/generate-monthly-charges');
+    }
   }
-});
+);
 
 app.get('/api/finances/payments', (req, res) => {
   try {
-    const payments = db.prepare(`
+    const payments = db
+      .prepare(`
       SELECT 
         p.*,
         t.first_name || ' ' || t.last_name as tenant_name,
@@ -954,66 +1324,97 @@ app.get('/api/finances/payments', (req, res) => {
       JOIN properties pr ON u.property_id = pr.id
       LEFT JOIN charges c ON p.charge_id = c.id
       ORDER BY p.payment_date DESC, p.created_at DESC
-    `).all();
+    `)
+      .all();
 
     res.json(payments);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/finances/payments');
   }
 });
 
-app.post('/api/finances/payments', (req, res) => {
-  try {
-    const { lease_id, tenant_id, charge_id, amount, payment_date, payment_method, reference_no, notes } = req.body;
-    if ((!lease_id && !tenant_id) || amount === undefined || !payment_date) {
-      return res.status(400).json({ error: 'Lease or tenant, amount, and payment date are required' });
-    }
+app.post(
+  '/api/finances/payments',
+  validateBody(schemas.SqlPaymentCreateSchema),
+  (req, res) => {
+    try {
+      const {
+        lease_id,
+        tenant_id,
+        charge_id,
+        amount,
+        payment_date,
+        payment_method,
+        reference_no,
+        notes
+      } = req.validatedBody;
+      if (!lease_id && !tenant_id) {
+        return res.status(400).json({ error: 'Lease or tenant is required' });
+      }
 
-    let finalLeaseId = lease_id;
-    let finalTenantId = tenant_id;
+      let finalLeaseId = lease_id;
+      let finalTenantId = tenant_id;
 
-    if (!finalTenantId && finalLeaseId) {
-      const lease = db.prepare('SELECT tenant_id FROM leases WHERE id = ?').get(finalLeaseId);
-      if (lease) finalTenantId = lease.tenant_id;
-    } else if (!finalLeaseId && finalTenantId) {
-      const activeLease = db.prepare("SELECT id FROM leases WHERE tenant_id = ? AND status = 'active'").get(finalTenantId);
-      if (activeLease) finalLeaseId = activeLease.id;
-    }
+      if (!finalTenantId && finalLeaseId) {
+        const lease = db.prepare('SELECT tenant_id FROM leases WHERE id = ?').get(finalLeaseId);
+        if (lease) finalTenantId = lease.tenant_id;
+      } else if (!finalLeaseId && finalTenantId) {
+        const activeLease = db
+          .prepare("SELECT id FROM leases WHERE tenant_id = ? AND status = 'active'")
+          .get(finalTenantId);
+        if (activeLease) finalLeaseId = activeLease.id;
+      }
 
-    if (!finalLeaseId || !finalTenantId) {
-      return res.status(400).json({ error: 'Could not associate payment with an active lease and tenant' });
-    }
+      if (!finalLeaseId || !finalTenantId) {
+        return res
+          .status(400)
+          .json({ error: 'Could not associate payment with an active lease and tenant' });
+      }
 
-    const payId = `pay-${uuidv4().substring(0, 8)}`;
-    const dateCode = payment_date.replace(/-/g, '');
-    const randCode = Math.floor(1000 + Math.random() * 9000);
-    const receiptNumber = `REC-${dateCode}-${randCode}`;
+      const payId = `pay-${uuidv4().substring(0, 8)}`;
+      const dateCode = payment_date.replace(/-/g, '');
+      const randCode = Math.floor(1000 + Math.random() * 9000);
+      const receiptNumber = `REC-${dateCode}-${randCode}`;
 
-    const transaction = db.transaction(() => {
-      db.prepare(`
+      const transaction = db.transaction(() => {
+        db.prepare(`
         INSERT INTO payments (id, lease_id, tenant_id, charge_id, amount, payment_date, payment_method, reference_no, notes, receipt_number)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(payId, finalLeaseId, finalTenantId, charge_id || null, Number(amount), payment_date, payment_method || 'bank_transfer', reference_no || null, notes || null, receiptNumber);
+      `).run(
+          payId,
+          finalLeaseId,
+          finalTenantId,
+          charge_id || null,
+          Number(amount),
+          payment_date,
+          payment_method || 'bank_transfer',
+          reference_no || null,
+          notes || null,
+          receiptNumber
+        );
 
-      // If tied to charge, update charge status
-      if (charge_id) {
-        const charge = db.prepare('SELECT amount FROM charges WHERE id = ?').get(charge_id);
-        if (charge) {
-          const totalPaidForCharge = db.prepare('SELECT SUM(amount) as total FROM payments WHERE charge_id = ?').get(charge_id).total || 0;
-          let newStatus = 'unpaid';
-          if (totalPaidForCharge >= charge.amount) {
-            newStatus = 'paid';
-          } else if (totalPaidForCharge > 0) {
-            newStatus = 'partial';
+        if (charge_id) {
+          const charge = db.prepare('SELECT amount FROM charges WHERE id = ?').get(charge_id);
+          if (charge) {
+            const totalPaidForCharge =
+              db
+                .prepare('SELECT SUM(amount) as total FROM payments WHERE charge_id = ?')
+                .get(charge_id).total || 0;
+            let newStatus = 'unpaid';
+            if (totalPaidForCharge >= charge.amount) {
+              newStatus = 'paid';
+            } else if (totalPaidForCharge > 0) {
+              newStatus = 'partial';
+            }
+            db.prepare('UPDATE charges SET status = ? WHERE id = ?').run(newStatus, charge_id);
           }
-          db.prepare('UPDATE charges SET status = ? WHERE id = ?').run(newStatus, charge_id);
         }
-      }
-    });
+      });
 
-    transaction();
+      transaction();
 
-    const created = db.prepare(`
+      const created = db
+        .prepare(`
       SELECT 
         p.*,
         t.first_name || ' ' || t.last_name as tenant_name,
@@ -1025,17 +1426,20 @@ app.post('/api/finances/payments', (req, res) => {
       JOIN units u ON l.unit_id = u.id
       JOIN properties pr ON u.property_id = pr.id
       WHERE p.id = ?
-    `).get(payId);
+    `)
+        .get(payId);
 
-    res.status(201).json(created);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+      res.status(201).json(created);
+    } catch (err) {
+      safeErrorResponse(res, err, 'POST /api/finances/payments');
+    }
   }
-});
+);
 
-app.get('/api/finances/receipt/:id', (req, res) => {
+app.get('/api/finances/receipt/:id', validateIdParam, (req, res) => {
   try {
-    const payment = db.prepare(`
+    const payment = db
+      .prepare(`
       SELECT 
         p.*,
         t.first_name,
@@ -1055,12 +1459,13 @@ app.get('/api/finances/receipt/:id', (req, res) => {
       JOIN units u ON l.unit_id = u.id
       JOIN properties pr ON u.property_id = pr.id
       WHERE p.id = ?
-    `).get(req.params.id);
+    `)
+      .get(req.params.id);
 
     if (!payment) return res.status(404).json({ error: 'Payment not found' });
     res.json(payment);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/finances/receipt/:id');
   }
 });
 
@@ -1069,6 +1474,12 @@ app.get('/api/finances/receipt/:id', (req, res) => {
 // -------------------------------------------------------------
 app.get('/api/maintenance', (req, res) => {
   try {
+    const queryCheck = schemas.SqlMaintenanceQuerySchema.safeParse(req.query || {});
+    if (!queryCheck.success) {
+      return res.status(400).json({ ok: false, error: formatZodError(queryCheck.error) });
+    }
+    const validQuery = queryCheck.data;
+
     let query = `
       SELECT 
         m.*,
@@ -1084,21 +1495,21 @@ app.get('/api/maintenance', (req, res) => {
     const params = [];
     const conditions = [];
 
-    if (req.query.status) {
+    if (validQuery.status) {
       conditions.push('m.status = ?');
-      params.push(req.query.status);
+      params.push(validQuery.status);
     }
-    if (req.query.priority) {
+    if (validQuery.priority) {
       conditions.push('m.priority = ?');
-      params.push(req.query.priority);
+      params.push(validQuery.priority);
     }
-    if (req.query.category) {
+    if (validQuery.category) {
       conditions.push('m.category = ?');
-      params.push(req.query.category);
+      params.push(validQuery.category);
     }
-    if (req.query.property_id) {
+    if (validQuery.property_id) {
       conditions.push('m.property_id = ?');
-      params.push(req.query.property_id);
+      params.push(validQuery.property_id);
     }
 
     if (conditions.length > 0) {
@@ -1109,58 +1520,114 @@ app.get('/api/maintenance', (req, res) => {
     const requests = db.prepare(query).all(...params);
     res.json(requests);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/maintenance');
   }
 });
 
-app.post('/api/maintenance', (req, res) => {
-  try {
-    const { property_id, unit_id, tenant_id, title, description, category, priority, status, estimated_cost, actual_cost, contractor_name, contractor_phone, invoice_ref, date_reported, date_scheduled, date_completed, notes } = req.body;
-    if (!property_id || !title || !description) {
-      return res.status(400).json({ error: 'Property, title, and description are required' });
-    }
+app.post(
+  '/api/maintenance',
+  validateBody(schemas.SqlMaintenanceCreateSchema),
+  (req, res) => {
+    try {
+      const {
+        property_id,
+        unit_id,
+        tenant_id,
+        title,
+        description,
+        category,
+        priority,
+        status,
+        estimated_cost,
+        actual_cost,
+        contractor_name,
+        contractor_phone,
+        invoice_ref,
+        date_reported,
+        date_scheduled,
+        date_completed,
+        notes
+      } = req.validatedBody;
 
-    const id = `maint-${uuidv4().substring(0, 8)}`;
-    const reportedDate = date_reported || getTodayString();
+      const id = `maint-${uuidv4().substring(0, 8)}`;
+      const reportedDate = date_reported || getTodayString();
 
-    db.prepare(`
+      db.prepare(`
       INSERT INTO maintenance_requests (
         id, property_id, unit_id, tenant_id, title, description, category, priority,
         status, estimated_cost, actual_cost, contractor_name, contractor_phone,
         invoice_ref, date_reported, date_scheduled, date_completed, notes
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      id, property_id, unit_id || null, tenant_id || null, title, description,
-      category || 'general', priority || 'medium', status || 'reported',
-      estimated_cost || 0, actual_cost || 0, contractor_name || null,
-      contractor_phone || null, invoice_ref || null, reportedDate,
-      date_scheduled || null, date_completed || null, notes || null
-    );
+        id,
+        property_id,
+        unit_id || null,
+        tenant_id || null,
+        title,
+        description,
+        category || 'general',
+        priority || 'medium',
+        status || 'reported',
+        estimated_cost || 0,
+        actual_cost || 0,
+        contractor_name || null,
+        contractor_phone || null,
+        invoice_ref || null,
+        reportedDate,
+        date_scheduled || null,
+        date_completed || null,
+        notes || null
+      );
 
-    const created = db.prepare(`
+      const created = db
+        .prepare(`
       SELECT m.*, p.name as property_name, u.unit_number
       FROM maintenance_requests m
       JOIN properties p ON m.property_id = p.id
       LEFT JOIN units u ON m.unit_id = u.id
       WHERE m.id = ?
-    `).get(id);
+    `)
+        .get(id);
 
-    res.status(201).json(created);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put('/api/maintenance/:id', (req, res) => {
-  try {
-    const { property_id, unit_id, tenant_id, title, description, category, priority, status, estimated_cost, actual_cost, contractor_name, contractor_phone, invoice_ref, date_reported, date_scheduled, date_completed, notes } = req.body;
-
-    let finalDateCompleted = date_completed;
-    if (status === 'completed' && !finalDateCompleted) {
-      finalDateCompleted = getTodayString();
+      res.status(201).json(created);
+    } catch (err) {
+      safeErrorResponse(res, err, 'POST /api/maintenance');
     }
+  }
+);
 
-    db.prepare(`
+app.put(
+  '/api/maintenance/:id',
+  validateIdParam,
+  validateBody(schemas.SqlMaintenanceCreateSchema),
+  (req, res) => {
+    try {
+      const {
+        property_id,
+        unit_id,
+        tenant_id,
+        title,
+        description,
+        category,
+        priority,
+        status,
+        estimated_cost,
+        actual_cost,
+        contractor_name,
+        contractor_phone,
+        invoice_ref,
+        date_reported,
+        date_scheduled,
+        date_completed,
+        notes
+      } = req.validatedBody;
+
+      let finalDateCompleted = date_completed;
+      if (status === 'completed' && !finalDateCompleted) {
+        finalDateCompleted = getTodayString();
+      }
+
+      db.prepare(`
       UPDATE maintenance_requests
       SET property_id = ?, unit_id = ?, tenant_id = ?, title = ?, description = ?,
           category = ?, priority = ?, status = ?, estimated_cost = ?, actual_cost = ?,
@@ -1168,57 +1635,80 @@ app.put('/api/maintenance/:id', (req, res) => {
           date_reported = ?, date_scheduled = ?, date_completed = ?, notes = ?
       WHERE id = ?
     `).run(
-      property_id, unit_id || null, tenant_id || null, title, description,
-      category, priority, status, estimated_cost || 0, actual_cost || 0,
-      contractor_name || null, contractor_phone || null, invoice_ref || null,
-      date_reported, date_scheduled || null, finalDateCompleted, notes || null,
-      req.params.id
-    );
+        property_id,
+        unit_id || null,
+        tenant_id || null,
+        title,
+        description,
+        category,
+        priority,
+        status,
+        estimated_cost || 0,
+        actual_cost || 0,
+        contractor_name || null,
+        contractor_phone || null,
+        invoice_ref || null,
+        date_reported || getTodayString(),
+        date_scheduled || null,
+        finalDateCompleted,
+        notes || null,
+        req.params.id
+      );
 
-    const updated = db.prepare('SELECT * FROM maintenance_requests WHERE id = ?').get(req.params.id);
-    res.json(updated);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.patch('/api/maintenance/:id/status', (req, res) => {
-  try {
-    const { status, actual_cost, notes } = req.body;
-    let completedDate = null;
-    if (status === 'completed') {
-      completedDate = getTodayString();
+      const updated = db
+        .prepare('SELECT * FROM maintenance_requests WHERE id = ?')
+        .get(req.params.id);
+      res.json(updated);
+    } catch (err) {
+      safeErrorResponse(res, err, 'PUT /api/maintenance/:id');
     }
+  }
+);
 
-    db.prepare(`
+app.patch(
+  '/api/maintenance/:id/status',
+  validateIdParam,
+  validateBody(schemas.SqlMaintenanceStatusSchema),
+  (req, res) => {
+    try {
+      const { status, actual_cost, notes } = req.validatedBody;
+      let completedDate = null;
+      if (status === 'completed') {
+        completedDate = getTodayString();
+      }
+
+      db.prepare(`
       UPDATE maintenance_requests
       SET status = ?, 
           actual_cost = COALESCE(?, actual_cost),
           date_completed = CASE WHEN ? = 'completed' THEN COALESCE(date_completed, ?) ELSE date_completed END,
           notes = COALESCE(?, notes)
       WHERE id = ?
-    `).run(status, actual_cost, status, completedDate, notes, req.params.id);
+    `).run(status, actual_cost ?? null, status, completedDate, notes, req.params.id);
 
-    const updated = db.prepare('SELECT * FROM maintenance_requests WHERE id = ?').get(req.params.id);
-    res.json(updated);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+      const updated = db
+        .prepare('SELECT * FROM maintenance_requests WHERE id = ?')
+        .get(req.params.id);
+      res.json(updated);
+    } catch (err) {
+      safeErrorResponse(res, err, 'PATCH /api/maintenance/:id/status');
+    }
   }
-});
+);
 
-app.delete('/api/maintenance/:id', (req, res) => {
+app.delete('/api/maintenance/:id', validateIdParam, (req, res) => {
   try {
     db.prepare('DELETE FROM maintenance_requests WHERE id = ?').run(req.params.id);
     res.json({ success: true, message: 'Maintenance request deleted' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'DELETE /api/maintenance/:id');
   }
 });
 
-// Maintenance cost analysis
 app.get('/api/maintenance-analytics/summary', (req, res) => {
   try {
-    const byCategory = db.prepare(`
+    const byCategory = db
+      .prepare(`
       SELECT 
         category,
         COUNT(*) as total_requests,
@@ -1228,9 +1718,11 @@ app.get('/api/maintenance-analytics/summary', (req, res) => {
       FROM maintenance_requests
       GROUP BY category
       ORDER BY total_actual_cost DESC
-    `).all();
+    `)
+      .all();
 
-    const byProperty = db.prepare(`
+    const byProperty = db
+      .prepare(`
       SELECT 
         p.id,
         p.name as property_name,
@@ -1241,11 +1733,12 @@ app.get('/api/maintenance-analytics/summary', (req, res) => {
       LEFT JOIN maintenance_requests m ON p.id = m.property_id
       GROUP BY p.id
       ORDER BY total_actual_cost DESC
-    `).all();
+    `)
+      .all();
 
     res.json({ byCategory, byProperty });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/maintenance-analytics/summary');
   }
 });
 
@@ -1254,7 +1747,6 @@ app.get('/api/maintenance-analytics/summary', (req, res) => {
 // -------------------------------------------------------------
 app.get('/api/reports/cashflow', (req, res) => {
   try {
-    // Generate monthly cashflow for past 6 months
     const months = [];
     const d = new Date();
     for (let i = 5; i >= 0; i--) {
@@ -1262,18 +1754,22 @@ app.get('/api/reports/cashflow', (req, res) => {
       months.push(past.toISOString().substring(0, 7));
     }
 
-    const cashflow = months.map(m => {
-      const rentCollected = db.prepare(`
+    const cashflow = months.map((m) => {
+      const rentCollected = db
+        .prepare(`
         SELECT COALESCE(SUM(amount), 0) as total 
         FROM payments 
         WHERE payment_date LIKE ?
-      `).get(`${m}%`).total;
+      `)
+        .get(`${m}%`).total;
 
-      const maintenanceCost = db.prepare(`
+      const maintenanceCost = db
+        .prepare(`
         SELECT COALESCE(SUM(CASE WHEN actual_cost > 0 THEN actual_cost ELSE estimated_cost END), 0) as total
         FROM maintenance_requests
         WHERE (date_completed LIKE ? OR date_reported LIKE ?)
-      `).get(`${m}%`, `${m}%`).total;
+      `)
+        .get(`${m}%`, `${m}%`).total;
 
       return {
         month: m,
@@ -1285,11 +1781,10 @@ app.get('/api/reports/cashflow', (req, res) => {
 
     res.json(cashflow);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/reports/cashflow');
   }
 });
 
-// Export all database tables as JSON
 app.get('/api/export/backup', (req, res) => {
   try {
     const data = {
@@ -1306,11 +1801,10 @@ app.get('/api/export/backup', (req, res) => {
     res.setHeader('Content-type', 'application/json');
     res.json(data);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'GET /api/export/backup');
   }
 });
 
-// Reset demo data
 app.post('/api/seed/reset', (req, res) => {
   try {
     db.exec(`
@@ -1325,7 +1819,7 @@ app.post('/api/seed/reset', (req, res) => {
     seedDatabase();
     res.json({ success: true, message: 'Database reset to demo state' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    safeErrorResponse(res, err, 'POST /api/seed/reset');
   }
 });
 
@@ -1335,7 +1829,7 @@ app.use(express.static(clientDistPath));
 
 app.use((req, res, next) => {
   if (req.method === 'GET' && !req.url.startsWith('/api')) {
-    return res.sendFile(path.join(clientDistPath, 'index.html'), err => {
+    return res.sendFile(path.join(clientDistPath, 'index.html'), (err) => {
       if (err) next();
     });
   }

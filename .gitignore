@@ -12,12 +12,13 @@ server/portal_state.json
 *.sqlite
 *.sqlite3
 
-# Environment & OS files
+# Environment files (exclude all .env* except .env.example)
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+
+# OS & deployment metadata
 .DS_Store
 Thumbs.db
 .vercel/
-
 .vercel

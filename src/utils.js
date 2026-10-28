@@ -2,6 +2,35 @@
 
 const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+// Sanitize dynamic user-submitted plain text strings against stored/reflected XSS payloads
+export function sanitizeText(value, maxLength = 1000) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .replace(/<\s*script[^>]*>[\s\S]*?<\s*\/\s*script\s*>/gi, '')
+    .replace(/<\s*(iframe|object|embed|applet|meta|link|style)[^>]*>/gi, '')
+    .replace(/\bon[a-z]+\s*=\s*(['"]).*?\1/gi, '')
+    .replace(/\b(javascript|vbscript|data\s*:\s*text\/html)\s*:/gi, '')
+    .trim()
+    .slice(0, maxLength);
+}
+
+// Sanitize and insert untrusted HTML using the native Sanitizer API (setHTML) with lazy-loaded DOMPurify fallback
+export async function safeSetHTML(targetElement, untrustedHTML) {
+  if (!targetElement) return;
+  const raw = String(untrustedHTML ?? '');
+  if ('setHTML' in Element.prototype) {
+    targetElement.setHTML(raw);
+    return;
+  }
+  const { default: DOMPurify } = await import('dompurify');
+  targetElement.innerHTML = DOMPurify.sanitize(raw, {
+    ALLOW_ARIA_ATTR: false,
+    ALLOW_DATA_ATTR: false,
+    KEEP_CONTENT: false
+  });
+}
+
 export function formatCurrency(amount, symbol = 'GH₵') {
   if (amount === null || amount === undefined || amount === '' || Number.isNaN(Number(amount))) {
     return `${symbol} 0.00`;
@@ -118,9 +147,21 @@ export function enrichTenantRecord(tenant, settings = {}) {
   const refDate = settings.referenceDateMode || '2026-10-27';
   const warningThreshold = Number(settings.expiryWarningThresholdDays) || 90;
 
-  if (tenant.isVacantSlot || tenant.rentStatus === 'No Contract' || !tenant.contractEnd) {
+  const sanitizedBase = {
+    ...tenant,
+    id: sanitizeText(tenant.id, 40),
+    name: sanitizeText(tenant.name, 160),
+    phone: sanitizeText(tenant.phone, 40),
+    whatsapp: sanitizeText(tenant.whatsapp, 40),
+    email: sanitizeText(tenant.email, 160),
+    property: sanitizeText(tenant.property, 40),
+    unit: sanitizeText(tenant.unit, 40),
+    notes: sanitizeText(tenant.notes, 2000)
+  };
+
+  if (sanitizedBase.isVacantSlot || sanitizedBase.rentStatus === 'No Contract' || !sanitizedBase.contractEnd) {
     return {
-      ...tenant,
+      ...sanitizedBase,
       rentStatus: 'No Contract',
       daysToExpiry: null,
       expiryAlert: 'No Contract',
@@ -130,10 +171,10 @@ export function enrichTenantRecord(tenant, settings = {}) {
     };
   }
 
-  const days = calculateDaysToExpiry(tenant.contractEnd, refDate);
-  const months = tenant.durationMonths || calculateMonthsBetween(tenant.contractStart, tenant.contractEnd) || 12;
-  const monthlyRent = Number(tenant.monthlyRent) || 0;
-  const totalRent = Number(tenant.totalRent) || (monthlyRent * months);
+  const days = calculateDaysToExpiry(sanitizedBase.contractEnd, refDate);
+  const months = sanitizedBase.durationMonths || calculateMonthsBetween(sanitizedBase.contractStart, sanitizedBase.contractEnd) || 12;
+  const monthlyRent = Number(sanitizedBase.monthlyRent) || 0;
+  const totalRent = Number(sanitizedBase.totalRent) || (monthlyRent * months);
 
   let rentStatus = 'Active';
   let expiryAlert = 'OK';
@@ -151,14 +192,14 @@ export function enrichTenantRecord(tenant, settings = {}) {
     }
   }
 
-  const progress = computeLeaseProgress(tenant.contractStart, tenant.contractEnd, refDate);
+  const progress = computeLeaseProgress(sanitizedBase.contractStart, sanitizedBase.contractEnd, refDate);
 
   return {
-    ...tenant,
+    ...sanitizedBase,
     monthlyRent,
     durationMonths: months,
     totalRent,
-    renewalDate: tenant.renewalDate || tenant.contractEnd,
+    renewalDate: sanitizedBase.renewalDate || sanitizedBase.contractEnd,
     daysToExpiry: days,
     rentStatus,
     expiryAlert,
@@ -280,7 +321,12 @@ export function exportTenantsToCSV(tenants, filename = 'Precourt_Luxury_Homes_Te
 
   const escapeCell = (val) => {
     if (val === null || val === undefined) return '';
-    const str = String(val).replace(/"/g, '""');
+    let str = String(val);
+    // Mitigate CSV Formula Injection (DDE / Spreadsheet Formula Execution)
+    if (/^[=+\-@\t\r]/.test(str)) {
+      str = `'${str}`;
+    }
+    str = str.replace(/"/g, '""');
     if (/[",\n]/.test(str)) return `"${str}"`;
     return str;
   };
@@ -417,23 +463,23 @@ export function parseCSVToTenants(csvText) {
     const totalRent = cleanMoney(totalRentRaw) || (monthlyRent * durationMonths);
 
     parsed.push({
-      id: id || `PLH-${String(parsed.length + 1).padStart(3, '0')}`,
-      name: name || 'Unnamed Tenant',
-      phone: phone || '',
-      whatsapp: whatsapp || '',
-      email: email || '',
-      property: property || 'PLH-AM',
-      unit: unit || '',
+      id: sanitizeText(id || `PLH-${String(parsed.length + 1).padStart(3, '0')}`, 40),
+      name: sanitizeText(name || 'Unnamed Tenant', 160),
+      phone: sanitizeText(phone || '', 40),
+      whatsapp: sanitizeText(whatsapp || '', 40),
+      email: sanitizeText(email || '', 160),
+      property: sanitizeText(property || 'PLH-AM', 40),
+      unit: sanitizeText(unit || '', 40),
       contractStart: toISODateString(contractStart),
       contractEnd: toISODateString(contractEnd),
       monthlyRent,
       durationMonths,
       totalRent,
       renewalDate: toISODateString(renewalDate) || toISODateString(contractEnd),
-      rentStatus: rentStatus || 'Active',
+      rentStatus: sanitizeText(rentStatus || 'Active', 60),
       daysToExpiry: daysRaw !== '' && daysRaw !== undefined ? Number(daysRaw) : null,
-      expiryAlert: expiryAlert || 'OK',
-      notes: notes || '',
+      expiryAlert: sanitizeText(expiryAlert || 'OK', 80),
+      notes: sanitizeText(notes || '', 2000),
       paymentStatus: 'Paid in Full',
       amountPaid: totalRent,
       renewalHistory: contractStart ? [

@@ -4,6 +4,21 @@ import tailwindcss from '@tailwindcss/vite';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+const {
+  applySecurityHeaders,
+  enforceFetchMetadataIsolation,
+  checkRateLimit,
+  resolveSession,
+  requireRole,
+  readBoundedJsonBody,
+  handleSessionEndpoint,
+  formatZodError,
+  scrubSensitiveLog,
+  schemas
+} = require('./server/security');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOCAL_STATE_FILE = path.join(__dirname, 'server', 'portal_state.json');
@@ -17,12 +32,39 @@ function plhPortalStateSyncPlugin() {
       const gistId = env.PLH_GIST_ID || process.env.PLH_GIST_ID;
       const githubToken = env.PLH_GITHUB_TOKEN || process.env.PLH_GITHUB_TOKEN;
 
+      // Apply HTTP security headers across dev server responses
+      server.middlewares.use((req, res, next) => {
+        applySecurityHeaders(req, res);
+        next();
+      });
+
+      // Handle /api/auth/session directly in Vite dev server
+      server.middlewares.use('/api/auth/session', async (req, res) => {
+        await handleSessionEndpoint(req, res);
+      });
+
       server.middlewares.use('/api/portal-state', async (req, res, next) => {
+        applySecurityHeaders(req, res);
         res.setHeader('Content-Type', 'application/json');
         res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
 
+        if (!enforceFetchMetadataIsolation(req, res)) return;
+
+        const isWrite = req.method === 'PUT' || req.method === 'POST';
+        if (
+          !checkRateLimit(req, res, {
+            bucket: isWrite ? 'portal-state-write' : 'portal-state-read',
+            maxRequests: isWrite ? 60 : 240,
+            windowMs: 60_000
+          })
+        ) {
+          return;
+        }
+
         try {
           if (req.method === 'GET') {
+            const session = resolveSession(req, res, { autoIssue: true });
+
             // Try cloud Gist first if configured, falling back to local server/portal_state.json
             let cloudState = null;
             if (gistId) {
@@ -62,7 +104,7 @@ function plhPortalStateSyncPlugin() {
                   : cloudState;
             }
 
-            if (resolvedState && fs.existsSync( path.dirname(LOCAL_STATE_FILE))) {
+            if (resolvedState && fs.existsSync(path.dirname(LOCAL_STATE_FILE))) {
               fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(resolvedState, null, 2), 'utf8');
             }
 
@@ -71,29 +113,38 @@ function plhPortalStateSyncPlugin() {
               JSON.stringify({
                 ok: true,
                 source: cloudState ? 'cloud+local' : 'local-disk',
+                role: session.role,
                 state: resolvedState
               })
             );
             return;
           }
 
-          if (req.method === 'PUT' || req.method === 'POST') {
-            let rawBody = '';
-            for await (const chunk of req) {
-              rawBody += chunk;
-            }
-            const parsed = JSON.parse(rawBody || '{}');
-            if (!Array.isArray(parsed.tenants)) {
+          if (isWrite) {
+            const session = requireRole(req, res, ['property_manager']);
+            if (!session) return;
+
+            const rawBody = await readBoundedJsonBody(req, res);
+            if (!rawBody) return;
+
+            const parsed = schemas.PortalStatePayloadSchema.safeParse(rawBody);
+            if (!parsed.success) {
               res.statusCode = 400;
-              res.end(JSON.stringify({ ok: false, error: 'tenants array required' }));
+              res.end(
+                JSON.stringify({
+                  ok: false,
+                  error: `Validation failed: ${formatZodError(parsed.error)}`
+                })
+              );
               return;
             }
 
+            const valid = parsed.data;
             const nextState = {
-              tenants: parsed.tenants,
-              properties: parsed.properties,
-              settings: parsed.settings,
-              updatedAt: Number(parsed.updatedAt) || Date.now()
+              tenants: valid.tenants,
+              properties: valid.properties,
+              settings: valid.settings,
+              updatedAt: Number(valid.updatedAt) || Date.now()
             };
 
             // Always persist to shared local disk file immediately
@@ -129,6 +180,7 @@ function plhPortalStateSyncPlugin() {
               JSON.stringify({
                 ok: true,
                 source: syncedCloud ? 'cloud+local' : 'local-disk',
+                role: session.role,
                 updatedAt: nextState.updatedAt,
                 state: nextState
               })
@@ -138,8 +190,9 @@ function plhPortalStateSyncPlugin() {
 
           next();
         } catch (err) {
+          console.error('[vite/portal-state] Error:', scrubSensitiveLog(err));
           res.statusCode = 500;
-          res.end(JSON.stringify({ ok: false, error: err.message }));
+          res.end(JSON.stringify({ ok: false, error: 'Internal server error' }));
         }
       });
     }

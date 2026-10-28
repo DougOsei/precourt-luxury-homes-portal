@@ -58,6 +58,9 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [autoTick, setAutoTick] = useState(0);
   const [syncStatus, setSyncStatus] = useState('synced'); // 'synced' | 'syncing'
+  // RBAC role is read exclusively from the server's signed HttpOnly cookie session (never localStorage)
+  const [userRole, setUserRole] = useState('property_manager');
+  const [sessionCookieType, setSessionCookieType] = useState('HttpOnly; SameSite=Lax');
 
   // Directory cross-navigation filter state
   const [directoryInitialFilters, setDirectoryInitialFilters] = useState(null);
@@ -153,6 +156,7 @@ export default function App() {
     try {
       const res = await fetch('/api/portal-state', {
         method: 'PUT',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           tenants: nextTenants,
@@ -161,11 +165,13 @@ export default function App() {
           updatedAt
         })
       });
-      if (res.ok) {
-        setSyncStatus('synced');
-      } else {
-        setSyncStatus('synced');
+      if (res.status === 403) {
+        setToast({
+          message: 'Access Denied: Read-only Tenant Viewer session cannot modify portal records.',
+          type: 'error'
+        });
       }
+      setSyncStatus('synced');
     } catch (err) {
       console.error('Failed to push portal state to cloud:', err);
       setSyncStatus('synced');
@@ -181,11 +187,15 @@ export default function App() {
       try {
         const res = await fetch(`/api/portal-state?t=${Date.now()}`, {
           method: 'GET',
+          credentials: 'same-origin',
           cache: 'no-store',
           headers: { 'Cache-Control': 'no-cache' }
         });
         if (!res.ok) return;
         const data = await res.json();
+        if (data?.role) {
+          setUserRole(data.role);
+        }
         const serverState = data?.state;
 
         if (!serverState || !Array.isArray(serverState.tenants)) {
@@ -245,8 +255,20 @@ export default function App() {
     [pushStateToCloud]
   );
 
-  // Set up initial cloud pull, periodic 4-second live sync, window focus/visibility sync, and BroadcastChannel
+  // Set up initial cloud pull, HttpOnly cookie session verification, periodic 4-second live sync, window focus/visibility sync, and BroadcastChannel
   useEffect(() => {
+    fetch('/api/auth/session', {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store'
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((sessionData) => {
+        if (sessionData?.role) setUserRole(sessionData.role);
+        if (sessionData?.cookieType) setSessionCookieType(sessionData.cookieType);
+      })
+      .catch(() => {});
+
     pullStateFromCloud(true);
 
     const pollInterval = setInterval(() => {
@@ -432,14 +454,58 @@ export default function App() {
     [tenants, selectedTenantId]
   );
 
+  const handleSwitchRole = async (targetRole) => {
+    try {
+      const res = await fetch('/api/auth/session', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: targetRole })
+      });
+      const data = await res.json();
+      if (res.ok && data?.role) {
+        setUserRole(data.role);
+        showToast(
+          `HttpOnly Session Role switched to ${
+            data.role === 'property_manager' ? 'Property Manager (Full Access)' : 'Tenant Viewer (Read-Only)'
+          }`,
+          'info'
+        );
+      } else {
+        showToast(data?.error || 'Could not switch session role', 'error');
+      }
+    } catch (e) {
+      showToast('Failed to update server session role', 'error');
+    }
+  };
+
+  const handleClearSessionData = async () => {
+    try {
+      await fetch('/api/auth/session', {
+        method: 'DELETE',
+        credentials: 'same-origin'
+      });
+      setUserRole('tenant_viewer');
+      showToast('HttpOnly session cookie & client site storage cleared (Clear-Site-Data)', 'info');
+    } catch (e) {}
+  };
+
   // Helper to commit tenant list updates and sync to Cloud + all browsers/Incognito immediately
   const commitTenantsUpdate = (updaterFn) => {
+    if (userRole !== 'property_manager') {
+      showToast(
+        'Read-Only Mode (Tenant Viewer): Switch to Property Manager role in Settings to modify records.',
+        'error'
+      );
+      return false;
+    }
     setRawTenants((prev) => {
       const nextRaw = typeof updaterFn === 'function' ? updaterFn(prev) : updaterFn;
       const nextEnriched = nextRaw.map((t) => enrichTenantRecord(t, settingsRef.current));
       pushStateToCloud(nextEnriched, propertiesRef.current, settingsRef.current);
       return nextEnriched;
     });
+    return true;
   };
 
   // Handlers for CRUD & Lease Actions
@@ -805,6 +871,13 @@ export default function App() {
             <SettingsView
               settings={settings}
               onUpdateSettings={(next) => {
+                if (userRole !== 'property_manager') {
+                  showToast(
+                    'Read-Only Mode (Tenant Viewer): Switch to Property Manager role to modify settings.',
+                    'error'
+                  );
+                  return;
+                }
                 setSettings(next);
                 pushStateToCloud(rawTenantsRef.current, propertiesRef.current, next);
                 showToast('Portal preferences saved & synced across all browsers', 'success');
@@ -814,6 +887,10 @@ export default function App() {
               onExportCSV={() => handleExportCSV(tenants)}
               onImportCSVText={handleImportCSVText}
               onResetDemo={handleResetDemo}
+              userRole={userRole}
+              sessionCookieType={sessionCookieType}
+              onSwitchRole={handleSwitchRole}
+              onClearSessionData={handleClearSessionData}
             />
           )}
         </main>
