@@ -16,7 +16,8 @@ import {
   RotateCcw,
   UserCog,
   LogOut,
-  Activity
+  Activity,
+  Wrench
 } from 'lucide-react';
 import { getInitials } from '../utils';
 
@@ -34,7 +35,8 @@ export default function Sidebar({
   onResetDemo,
   currentUser,
   onLogout,
-  auditLogsCount = 0
+  auditLogsCount = 0,
+  overdueMaintenanceCount = 0
 }) {
   const isSuperAdmin = currentUser?.role === 'SUPER_ADMIN';
 
@@ -45,6 +47,16 @@ export default function Sidebar({
       subtitle: 'Overview, KPIs & analytics',
       icon: LayoutDashboard,
       badge: null
+    },
+    {
+      id: 'maintenance-fees',
+      label: 'Maintenance Fees & Ops',
+      subtitle: 'GH₵ 3,000 fee & facility ops',
+      icon: Wrench,
+      badge: overdueMaintenanceCount > 0 ? `${overdueMaintenanceCount} overdue` : 'GH₵ 3k',
+      badgeClass: overdueMaintenanceCount > 0
+        ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse font-bold'
+        : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold'
     },
     {
       id: 'properties',

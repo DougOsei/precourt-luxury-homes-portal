@@ -475,10 +475,76 @@ const PortalSettingsSchema = z
   })
   .passthrough();
 
+const MaintenanceFeeInstallmentSchema = z
+  .object({
+    id: optStr(80),
+    amount: z.coerce.number().min(0).max(100_000_000),
+    date: optStr(40),
+    method: optStr(60),
+    receiptNumber: optStr(80),
+    notes: optStr(500),
+    recordedBy: optStr(120)
+  })
+  .passthrough();
+
+const MaintenanceFeeRecordSchema = z
+  .object({
+    id: cleanStr(80),
+    tenantId: cleanStr(80),
+    tenantName: cleanStr(160),
+    phone: optStr(40),
+    unitId: cleanStr(40),
+    propertyId: cleanStr(40),
+    billingYear: z.coerce.number().int().min(2020).max(2100).default(2026),
+    totalAmountDue: z.coerce.number().min(0).max(10_000_000).default(3000),
+    amountPaid: z.coerce.number().min(0).max(10_000_000).default(0),
+    paymentStatus: z.enum(['PAID', 'PARTIALLY_PAID', 'PENDING', 'OVERDUE']).default('PENDING'),
+    dueDate: cleanStr(40),
+    paymentDate: nullableStr(40),
+    paymentMethod: nullableStr(60),
+    receiptNumber: nullableStr(80),
+    installments: z.array(MaintenanceFeeInstallmentSchema).max(50).optional().default([]),
+    notes: optStr(2000),
+    updatedAt: optStr(60)
+  })
+  .passthrough();
+
+const FacilityChecklistItemSchema = z
+  .object({
+    item: cleanStr(300),
+    done: z.boolean().default(false)
+  })
+  .passthrough();
+
+const FacilityServiceScheduleSchema = z
+  .object({
+    id: cleanStr(80),
+    serviceType: z.enum(['AC_SERVICING', 'TRASH_DISPOSAL', 'WATER_PUMP', 'COMPOUND_CLEANING']),
+    title: cleanStr(200),
+    frequency: z.enum(['QUARTERLY', 'MONTHLY', 'WEEKLY', 'DAILY']),
+    propertyId: cleanStr(40).default('ALL'),
+    unitId: optStr(40),
+    scheduledDate: cleanStr(40),
+    completedDate: nullableStr(40),
+    status: z.enum(['SCHEDULED', 'IN_PROGRESS', 'COMPLETED', 'DELAYED']).default('SCHEDULED'),
+    assignedVendor: optStr(160),
+    staffName: optStr(120),
+    costIncurred: z.coerce.number().min(0).max(10_000_000).default(0),
+    checklist: z.array(FacilityChecklistItemSchema).max(50).optional().default([]),
+    notes: optStr(2000),
+    receiptAttachmentUrl: nullableStr(500),
+    loggedByManagerId: optStr(80),
+    loggedByName: optStr(120),
+    updatedAt: optStr(60)
+  })
+  .passthrough();
+
 const PortalStatePayloadSchema = z.object({
   tenants: z.array(PortalTenantRecordSchema).min(1).max(200),
   properties: z.array(PortalPropertyRecordSchema).max(50).optional(),
   settings: PortalSettingsSchema.optional(),
+  maintenanceFees: z.array(MaintenanceFeeRecordSchema).max(300).optional(),
+  facilitySchedules: z.array(FacilityServiceScheduleSchema).max(500).optional(),
   auditLogs: z.array(AuditLogEntrySchema).max(250).optional(),
   auditEntry: AuditLogEntrySchema.optional(),
   updatedAt: z.coerce.number().optional()
@@ -728,6 +794,8 @@ module.exports = {
   schemas: {
     IdParamSchema,
     PortalStatePayloadSchema,
+    MaintenanceFeeRecordSchema,
+    FacilityServiceScheduleSchema,
     SessionRoleSwitchSchema,
     SqlPropertySchema,
     SqlUnitSchema,

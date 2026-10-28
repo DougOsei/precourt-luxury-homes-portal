@@ -168,6 +168,12 @@ app.get('/api/portal-state', async (req, res) => {
         cloudState?.auditLogs || [],
         localState?.auditLogs || []
       );
+      if (!Array.isArray(resolvedState.maintenanceFees) && Array.isArray(localState?.maintenanceFees)) {
+        resolvedState.maintenanceFees = localState.maintenanceFees;
+      }
+      if (!Array.isArray(resolvedState.facilitySchedules) && Array.isArray(localState?.facilitySchedules)) {
+        resolvedState.facilitySchedules = localState.facilitySchedules;
+      }
       fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(resolvedState, null, 2), 'utf8');
     }
 
@@ -227,6 +233,8 @@ app.put(
         tenants: valid.tenants,
         properties: valid.properties,
         settings: valid.settings,
+        maintenanceFees: valid.maintenanceFees,
+        facilitySchedules: valid.facilitySchedules,
         auditLogs: mergedLogs,
         managers: existingManagers,
         updatedAt: Number(valid.updatedAt) || Date.now()
@@ -1894,13 +1902,15 @@ app.use((req, res, next) => {
       return res.redirect(302, '/dashboard');
     }
 
-    // 2. Guard protected routes (/dashboard, /properties, /tenants, /leases, /finances, /settings, /admin/*)
+    // 2. Guard protected routes (/dashboard, /properties, /tenants, /leases, /finances, /maintenance-fees, /activity-log, /settings, /admin/*)
     const isProtectedRoute =
       urlPath.startsWith('/dashboard') ||
       urlPath.startsWith('/properties') ||
       urlPath.startsWith('/tenants') ||
       urlPath.startsWith('/leases') ||
       urlPath.startsWith('/finances') ||
+      urlPath.startsWith('/maintenance-fees') ||
+      urlPath.startsWith('/activity-log') ||
       urlPath.startsWith('/settings') ||
       urlPath.startsWith('/admin');
 

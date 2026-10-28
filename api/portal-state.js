@@ -127,6 +127,12 @@ module.exports = async function handler(req, res) {
         const cloudState = await fetchFromGist(gistId, githubToken);
         if (cloudState) {
           cloudState.auditLogs = mergeAuditLogs(cloudState.auditLogs || [], memoryCache?.auditLogs || []);
+          if (!Array.isArray(cloudState.maintenanceFees) && Array.isArray(memoryCache?.maintenanceFees)) {
+            cloudState.maintenanceFees = memoryCache.maintenanceFees;
+          }
+          if (!Array.isArray(cloudState.facilitySchedules) && Array.isArray(memoryCache?.facilitySchedules)) {
+            cloudState.facilitySchedules = memoryCache.facilitySchedules;
+          }
           memoryCache = cloudState;
           const safeState = { ...cloudState };
           delete safeState.managers;
@@ -189,6 +195,8 @@ module.exports = async function handler(req, res) {
         tenants: valid.tenants,
         properties: valid.properties,
         settings: valid.settings,
+        maintenanceFees: valid.maintenanceFees,
+        facilitySchedules: valid.facilitySchedules,
         auditLogs: mergedLogs,
         updatedAt: Number(valid.updatedAt) || Date.now()
       };

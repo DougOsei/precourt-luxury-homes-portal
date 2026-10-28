@@ -17,8 +17,12 @@ import {
   AlertOctagon,
   History,
   Sparkles,
-  ExternalLink
+  ExternalLink,
+  Wrench,
+  Printer,
+  Receipt
 } from 'lucide-react';
+import { COVERED_FACILITY_SERVICES } from '../data/maintenanceData';
 import {
   formatCurrency,
   formatDateCSV,
@@ -35,6 +39,8 @@ export default function TenantDrawer({
   tenant,
   properties,
   settings,
+  maintenanceFees = [],
+  facilitySchedules = [],
   onClose,
   onSaveInline,
   onOpenFullEditModal,
@@ -43,6 +49,7 @@ export default function TenantDrawer({
 }) {
   const [isEditingInline, setIsEditingInline] = useState(false);
   const [draft, setDraft] = useState(null);
+  const [showReceiptModal, setShowReceiptModal] = useState(false);
 
   useEffect(() => {
     if (tenant) {
@@ -100,6 +107,24 @@ export default function TenantDrawer({
     isExpired ? 'overdue' : 'renewal',
     settings
   );
+
+  const tenantFeeRecord = maintenanceFees.find(
+    (f) =>
+      (f.tenantId && f.tenantId === tenant.id) ||
+      (f.unitId && f.unitId.toUpperCase() === (tenant.unit || '').toUpperCase())
+  ) || {
+    id: `MF-${tenant.unit || '01'}-2026`,
+    tenantId: tenant.id,
+    unitId: tenant.unit,
+    billingYear: 2026,
+    totalAmountDue: 3000,
+    amountPaid: 0,
+    paymentStatus: 'PENDING',
+    dueDate: '2026-03-31',
+    paymentDate: null,
+    paymentMethod: 'Mobile Money (MTN MoMo)',
+    receiptNumber: `PLH-REC-2026-${tenant.unit || '00'}`
+  };
 
   const handleDraftDateChange = (field, value) => {
     const updated = { ...draft, [field]: value };
@@ -636,6 +661,126 @@ export default function TenantDrawer({
                 </div>
               </div>
 
+              {/* 3B. Annual Maintenance Fee & Transparency Widget (GH₵ 3,000 / Billing Year) */}
+              {!isVacant && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xs font-extrabold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                      <Wrench className="w-3.5 h-3.5 text-emerald-500" />
+                      Annual Maintenance Fee & Transparency
+                    </h3>
+                    <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                      GH₵ 3,000.00 / 2026
+                    </span>
+                  </div>
+
+                  {/* Fee Status Card */}
+                  <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
+                    <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+                      <div>
+                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 block">
+                          Annual Service Charge
+                        </span>
+                        <span className="text-lg font-black font-mono text-slate-900 dark:text-white">
+                          GH₵ 3,000.00
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 block">
+                          Payment Status
+                        </span>
+                        <span
+                          className={`inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-0.5 rounded-full ${
+                            tenantFeeRecord.paymentStatus === 'PAID'
+                              ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
+                              : tenantFeeRecord.paymentStatus === 'PARTIALLY_PAID'
+                                ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30'
+                                : tenantFeeRecord.paymentStatus === 'OVERDUE'
+                                  ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30 font-black'
+                                  : 'bg-slate-200/80 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                          }`}
+                        >
+                          {tenantFeeRecord.paymentStatus}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 text-xs">
+                      <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/50">
+                        <span className="text-[10px] text-slate-400 uppercase font-semibold block">Paid to Date</span>
+                        <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                          GH₵ {(tenantFeeRecord.amountPaid || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                      <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/50">
+                        <span className="text-[10px] text-slate-400 uppercase font-semibold block">Balance Due</span>
+                        <span className="font-mono font-bold text-rose-600 dark:text-rose-400">
+                          GH₵ {Math.max(0, 3000 - (tenantFeeRecord.amountPaid || 0)).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                      <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/50">
+                        <span className="text-[10px] text-slate-400 uppercase font-semibold block">Due Date</span>
+                        <span className="font-mono font-bold text-slate-800 dark:text-slate-200">
+                          {formatDateCSV(tenantFeeRecord.dueDate || '2026-03-31')}
+                        </span>
+                      </div>
+                    </div>
+
+                    {tenantFeeRecord.receiptNumber && (
+                      <div className="flex items-center justify-between pt-1">
+                        <span className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+                          Receipt: <strong className="text-slate-800 dark:text-slate-200">{tenantFeeRecord.receiptNumber}</strong>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setShowReceiptModal(true)}
+                          className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-600 dark:text-emerald-400 hover:underline cursor-pointer"
+                        >
+                          <Receipt className="w-3.5 h-3.5" />
+                          <span>View / Print Receipt</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* "Where Your Fee Goes" Breakdown Widget */}
+                  <div className="p-4 rounded-2xl bg-gradient-to-br from-emerald-950/20 to-teal-950/20 border border-emerald-500/20 dark:border-emerald-500/30 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black text-emerald-900 dark:text-emerald-200 flex items-center gap-1.5">
+                        <ShieldCheck className="w-4 h-4 text-emerald-500" />
+                        Where Your GH₵ 3,000 Fee Goes
+                      </span>
+                      <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-300">
+                        4 Covered Services
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                      {COVERED_FACILITY_SERVICES.map((srv) => (
+                        <div
+                          key={srv.id}
+                          className="p-2.5 rounded-xl bg-white/70 dark:bg-slate-900/70 border border-emerald-500/15 flex flex-col justify-between"
+                        >
+                          <div>
+                            <div className="flex items-center gap-1.5 font-bold text-slate-900 dark:text-white">
+                              <span>{srv.icon}</span>
+                              <span>{srv.title}</span>
+                            </div>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
+                              {srv.description}
+                            </p>
+                          </div>
+                          <div className="mt-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[10px] text-emerald-700 dark:text-emerald-400 font-semibold">
+                            <span>{srv.schedule}</span>
+                            <span className="font-mono">Next: {srv.nextDate}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* 4. Contact & Notes Details */}
               <div className="space-y-2.5">
                 <h3 className="text-xs font-extrabold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
@@ -802,6 +947,119 @@ export default function TenantDrawer({
           </div>
         </div>
       </aside>
+
+      {/* Printable Official Maintenance Fee Receipt Modal */}
+      {showReceiptModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in"
+          style={{ overscrollBehavior: 'contain' }}
+        >
+          <div
+            className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl max-w-lg w-full overflow-hidden"
+            style={{ overscrollBehavior: 'contain' }}
+          >
+            <div className="p-6 bg-gradient-to-br from-emerald-900 to-slate-950 text-white flex items-center justify-between">
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400 block">
+                  Precourt Luxury Homes Ltd.
+                </span>
+                <h3 className="text-lg font-black mt-0.5">Annual Maintenance Fee Receipt</h3>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  Official Payment Voucher • Billing Cycle {tenantFeeRecord.billingYear || 2026}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowReceiptModal(false)}
+                className="p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 text-xs">
+              <div className="grid grid-cols-2 gap-3 p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200/80 dark:border-slate-800">
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-slate-400 block">Receipt No.</span>
+                  <span className="font-mono font-bold text-slate-900 dark:text-white mt-0.5 block">
+                    {tenantFeeRecord.receiptNumber || `PLH-REC-2026-${tenant.unit}`}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-slate-400 block">Date of Issue</span>
+                  <span className="font-mono font-bold text-slate-900 dark:text-white mt-0.5 block">
+                    {formatDateCSV(tenantFeeRecord.paymentDate || tenantFeeRecord.dueDate || '2026-03-31')}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-slate-400 block">Tenant / Resident</span>
+                  <span className="font-bold text-slate-900 dark:text-white mt-0.5 block">
+                    {tenant.name}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-slate-400 block">Apartment & Property</span>
+                  <span className="font-bold text-emerald-600 dark:text-emerald-400 mt-0.5 block">
+                    Unit {tenant.unit} ({tenant.property})
+                  </span>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 space-y-2">
+                <div className="flex justify-between items-center text-sm">
+                  <span className="font-bold text-slate-700 dark:text-slate-300">Total Annual Fee Due:</span>
+                  <span className="font-mono font-black text-slate-900 dark:text-white">GH₵ 3,000.00</span>
+                </div>
+                <div className="flex justify-between items-center text-sm">
+                  <span className="font-bold text-emerald-700 dark:text-emerald-400">Total Amount Paid:</span>
+                  <span className="font-mono font-black text-emerald-600 dark:text-emerald-400">
+                    GH₵ {(tenantFeeRecord.amountPaid || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-sm pt-2 border-t border-emerald-500/20">
+                  <span className="font-bold text-slate-700 dark:text-slate-300">Outstanding Balance:</span>
+                  <span className="font-mono font-black text-rose-600 dark:text-rose-400">
+                    GH₵ {Math.max(0, 3000 - (tenantFeeRecord.amountPaid || 0)).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+              </div>
+
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 space-y-1">
+                <div className="flex justify-between">
+                  <span>Payment Method:</span>
+                  <span className="font-semibold text-slate-800 dark:text-slate-200">{tenantFeeRecord.paymentMethod || 'Mobile Money / Bank Transfer'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Payment Status:</span>
+                  <span className="font-bold text-emerald-600 dark:text-emerald-400">{tenantFeeRecord.paymentStatus}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Managing Facility Manager:</span>
+                  <span className="font-semibold text-slate-800 dark:text-slate-200">Douglas Amadie</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-50 dark:bg-slate-950/80 border-t border-slate-200 dark:border-slate-800 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowReceiptModal(false)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 flex items-center gap-1.5 cursor-pointer shadow-sm"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                Print Official Receipt
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

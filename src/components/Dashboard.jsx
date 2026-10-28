@@ -16,7 +16,8 @@ import {
   Sparkles,
   ChevronRight,
   Calendar,
-  Activity
+  Activity,
+  Wrench
 } from 'lucide-react';
 import {
   formatCurrency,
@@ -36,7 +37,9 @@ export default function Dashboard({
   onSelectTenant,
   onRenewTenant,
   onFilterNavigate,
-  auditLogs = []
+  auditLogs = [],
+  maintenanceFees = [],
+  facilitySchedules = []
 }) {
   const [propertyChartMode, setPropertyChartMode] = useState('units'); // 'units' | 'revenue'
   const [selectedTimelineBucket, setSelectedTimelineBucket] = useState(null);
@@ -44,6 +47,13 @@ export default function Dashboard({
 
   const sym = settings?.currencySymbol || 'GH₵';
   const threshold = settings?.expiryWarningThresholdDays || 90;
+
+  // Maintenance fees overview for Facility Manager Douglas Amadie
+  const overdueFeesList = maintenanceFees.filter((f) => f.paymentStatus === 'OVERDUE');
+  const totalFeesCollected = maintenanceFees.reduce((acc, f) => acc + (Number(f.amountPaid) || 0), 0);
+  const totalFeesDue = maintenanceFees.reduce((acc, f) => acc + (Number(f.totalAmountDue) || 3000), 0);
+  const totalFeesOutstanding = Math.max(0, totalFeesDue - totalFeesCollected);
+  const feeComplianceRate = totalFeesDue > 0 ? Math.round((totalFeesCollected / totalFeesDue) * 100) : 100;
 
   // Compute property breakdown (PLH-AM vs PLH-KW)
   const propertyStats = properties.map((prop) => {
@@ -365,6 +375,80 @@ export default function Dashboard({
             <span>Active: {formatCompactCurrency(metrics.activeContractValue, sym)}</span>
             <ArrowUpRight className="w-3.5 h-3.5 text-amber-300" />
           </p>
+        </div>
+      </div>
+
+      {/* 1B. Annual Maintenance Fee & Facility Operations Spotlight (GH₵ 3,000 / Unit) */}
+      <div
+        onClick={() => onNavigate('maintenance-fees')}
+        className={`group p-4 sm:p-5 rounded-2xl border transition-all cursor-pointer shadow-xs hover:shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4 ${
+          overdueFeesList.length > 0
+            ? 'bg-rose-50/80 dark:bg-rose-950/20 border-rose-500/40 hover:border-rose-500/70'
+            : 'bg-emerald-50/70 dark:bg-emerald-950/20 border-emerald-500/30 hover:border-emerald-500/60'
+        }`}
+      >
+        <div className="flex items-start sm:items-center gap-3.5">
+          <div
+            className={`p-3 rounded-2xl shrink-0 ${
+              overdueFeesList.length > 0
+                ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
+                : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+            }`}
+          >
+            <Wrench className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span
+                className={`text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                  overdueFeesList.length > 0
+                    ? 'bg-rose-500 text-white animate-pulse'
+                    : 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300'
+                }`}
+              >
+                {overdueFeesList.length > 0 ? `${overdueFeesList.length} OVERDUE ACCOUNTS` : 'ANNUAL FEES ALL CURRENT'}
+              </span>
+              <span className="text-xs text-slate-500 dark:text-slate-400 font-semibold hidden sm:inline">
+                Douglas Amadie • Facility Operations
+              </span>
+            </div>
+            <h3 className="font-extrabold text-sm sm:text-base text-slate-900 dark:text-white mt-0.5">
+              Annual Maintenance Fee Ledger (GH₵ 3,000 / Unit) & Service Schedules
+            </h3>
+            <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
+              Quarterly AC Servicing, Routine Trash Disposal, Water Pump Maintenance & Compound Cleaning.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4 sm:gap-6 shrink-0 self-end md:self-center">
+          <div className="text-right">
+            <span className="text-[10px] uppercase font-bold text-slate-400 block">Collected to Date</span>
+            <span className="text-base font-black font-mono text-emerald-600 dark:text-emerald-400">
+              GH₵ {totalFeesCollected.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+            </span>
+            <span className="text-[10px] text-slate-500 dark:text-slate-400 block font-semibold">
+              {feeComplianceRate}% Compliance
+            </span>
+          </div>
+          <div className="text-right pl-4 border-l border-slate-200 dark:border-slate-800">
+            <span className="text-[10px] uppercase font-bold text-slate-400 block">Outstanding</span>
+            <span
+              className={`text-base font-black font-mono ${
+                overdueFeesList.length > 0
+                  ? 'text-rose-600 dark:text-rose-400 font-extrabold'
+                  : 'text-slate-600 dark:text-slate-300'
+              }`}
+            >
+              GH₵ {totalFeesOutstanding.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+            </span>
+            <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
+              {overdueFeesList.length} Accounts
+            </span>
+          </div>
+          <div className="p-2 rounded-xl bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 group-hover:bg-emerald-600 group-hover:text-white transition shadow-2xs">
+            <ChevronRight className="w-4 h-4" />
+          </div>
         </div>
       </div>
 

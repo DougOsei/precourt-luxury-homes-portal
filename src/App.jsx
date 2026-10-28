@@ -10,6 +10,7 @@ import SettingsView from './components/SettingsView';
 import LoginPage from './components/LoginPage';
 import ManagersAdminView from './components/ManagersAdminView';
 import ActivityLogView from './components/ActivityLogView';
+import MaintenanceFeesView from './components/MaintenanceFeesView';
 import TenantDrawer from './components/TenantDrawer';
 import TenantModal, {
   RenewLeaseModal,
@@ -23,6 +24,10 @@ import {
   DEFAULT_SETTINGS
 } from './data/initialTenants';
 import {
+  DEFAULT_MAINTENANCE_FEES,
+  DEFAULT_FACILITY_SCHEDULES
+} from './data/maintenanceData';
+import {
   enrichTenantRecord,
   exportTenantsToCSV,
   parseCSVToTenants,
@@ -33,6 +38,8 @@ const STORAGE_KEY_TENANTS = 'plh_portal_tenants_v3';
 const STORAGE_KEY_PROPERTIES = 'plh_portal_properties_v3';
 const STORAGE_KEY_SETTINGS = 'plh_portal_settings_v3';
 const STORAGE_KEY_AUDIT_LOGS = 'plh_portal_audit_logs_v3';
+const STORAGE_KEY_MAINTENANCE_FEES = 'plh_portal_maintenance_fees_v3';
+const STORAGE_KEY_FACILITY_SCHEDULES = 'plh_portal_facility_schedules_v3';
 const STORAGE_KEY_UPDATED_AT = 'plh_portal_updated_at_v3';
 
 // Helper to recover any unsynced edits from v3, v2, or v1 localStorage keys
@@ -59,6 +66,7 @@ function resolveTabFromPath(pathname) {
   const p = (pathname || '/').toLowerCase();
   if (p.startsWith('/admin/managers') || p.startsWith('/admin')) return 'managers';
   if (p.startsWith('/activity-log') || p.startsWith('/audit')) return 'activity-log';
+  if (p.startsWith('/dashboard/maintenance-fees') || p.startsWith('/maintenance-fees') || p.startsWith('/facility-operations') || p.startsWith('/operations')) return 'maintenance-fees';
   if (p.startsWith('/properties')) return 'properties';
   if (p.startsWith('/tenants')) return 'tenants';
   if (p.startsWith('/leases')) return 'leases';
@@ -73,6 +81,8 @@ function resolvePathFromTab(tab) {
       return '/admin/managers';
     case 'activity-log':
       return '/activity-log';
+    case 'maintenance-fees':
+      return '/dashboard/maintenance-fees';
     case 'properties':
       return '/properties';
     case 'tenants':
@@ -150,11 +160,35 @@ export default function App() {
     return [];
   });
 
+  const [maintenanceFees, setMaintenanceFees] = useState(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_MAINTENANCE_FEES);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {}
+    return DEFAULT_MAINTENANCE_FEES;
+  });
+
+  const [facilitySchedules, setFacilitySchedules] = useState(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_FACILITY_SCHEDULES);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {}
+    return DEFAULT_FACILITY_SCHEDULES;
+  });
+
   // Track latest state in refs for cloud sync & polling
   const rawTenantsRef = useRef(rawTenants);
   const propertiesRef = useRef(properties);
   const settingsRef = useRef(settings);
   const auditLogsRef = useRef(auditLogs);
+  const maintenanceFeesRef = useRef(maintenanceFees);
+  const facilitySchedulesRef = useRef(facilitySchedules);
   const isSavingRef = useRef(false);
   const lastKnownUpdatedAtRef = useRef(
     (() => {
@@ -194,9 +228,30 @@ export default function App() {
     } catch (e) {}
   }, [auditLogs]);
 
+  useEffect(() => {
+    maintenanceFeesRef.current = maintenanceFees;
+    try {
+      localStorage.setItem(STORAGE_KEY_MAINTENANCE_FEES, JSON.stringify(maintenanceFees));
+    } catch (e) {}
+  }, [maintenanceFees]);
+
+  useEffect(() => {
+    facilitySchedulesRef.current = facilitySchedules;
+    try {
+      localStorage.setItem(STORAGE_KEY_FACILITY_SCHEDULES, JSON.stringify(facilitySchedules));
+    } catch (e) {}
+  }, [facilitySchedules]);
+
   // Push any portal state update to /api/portal-state (Cloud + Local Server + BroadcastChannel)
   const pushStateToCloud = useCallback(
-    async (nextTenants, nextProps, nextSettings, auditEntry = null) => {
+    async (
+      nextTenants,
+      nextProps,
+      nextSettings,
+      auditEntry = null,
+      nextFees = null,
+      nextSchedules = null
+    ) => {
       const updatedAt = Date.now();
       lastKnownUpdatedAtRef.current = updatedAt;
       isSavingRef.current = true;
@@ -205,6 +260,9 @@ export default function App() {
       const nextAuditLogs = auditEntry
         ? [auditEntry, ...auditLogsRef.current.filter((e) => e.id !== auditEntry.id)].slice(0, 200)
         : auditLogsRef.current;
+
+      const feesToSave = nextFees ?? maintenanceFeesRef.current;
+      const schedulesToSave = nextSchedules ?? facilitySchedulesRef.current;
 
       if (auditEntry) {
         setAuditLogs(nextAuditLogs);
@@ -223,6 +281,8 @@ export default function App() {
           properties: nextProps,
           settings: nextSettings,
           auditLogs: nextAuditLogs,
+          maintenanceFees: feesToSave,
+          facilitySchedules: schedulesToSave,
           updatedAt
         });
         bc.close();
@@ -241,6 +301,8 @@ export default function App() {
             properties: nextProps,
             settings: nextSettings,
             auditLogs: nextAuditLogs,
+            maintenanceFees: feesToSave,
+            facilitySchedules: schedulesToSave,
             ...(auditEntry ? { auditEntry } : {}),
             updatedAt
           })
@@ -346,6 +408,26 @@ export default function App() {
           }
           if (serverState.settings) {
             setSettings(nextSettings);
+          }
+          if (Array.isArray(serverState.maintenanceFees) && serverState.maintenanceFees.length > 0) {
+            setMaintenanceFees(serverState.maintenanceFees);
+            maintenanceFeesRef.current = serverState.maintenanceFees;
+            try {
+              localStorage.setItem(
+                STORAGE_KEY_MAINTENANCE_FEES,
+                JSON.stringify(serverState.maintenanceFees)
+              );
+            } catch (e) {}
+          }
+          if (Array.isArray(serverState.facilitySchedules) && serverState.facilitySchedules.length > 0) {
+            setFacilitySchedules(serverState.facilitySchedules);
+            facilitySchedulesRef.current = serverState.facilitySchedules;
+            try {
+              localStorage.setItem(
+                STORAGE_KEY_FACILITY_SCHEDULES,
+                JSON.stringify(serverState.facilitySchedules)
+              );
+            } catch (e) {}
           }
           setRawTenants(serverState.tenants.map((t) => enrichTenantRecord(t, nextSettings)));
         }
@@ -479,6 +561,14 @@ export default function App() {
           if (Array.isArray(msg.properties)) setProperties(msg.properties);
           if (msg.settings) setSettings(msg.settings);
           if (Array.isArray(msg.auditLogs)) setAuditLogs(msg.auditLogs);
+          if (Array.isArray(msg.maintenanceFees)) {
+            setMaintenanceFees(msg.maintenanceFees);
+            maintenanceFeesRef.current = msg.maintenanceFees;
+          }
+          if (Array.isArray(msg.facilitySchedules)) {
+            setFacilitySchedules(msg.facilitySchedules);
+            facilitySchedulesRef.current = msg.facilitySchedules;
+          }
         }
       };
     } catch (e) {}
@@ -1011,6 +1101,34 @@ export default function App() {
     showToast(`Removed ${tenant.name}; Unit ${tenant.unit} is now marked Vacant`, 'info');
   };
 
+  const handleUpdateFeesAndSchedules = useCallback(
+    (nextFees, nextSchedules, auditEntry) => {
+      if (nextFees) {
+        setMaintenanceFees(nextFees);
+        maintenanceFeesRef.current = nextFees;
+        try {
+          localStorage.setItem(STORAGE_KEY_MAINTENANCE_FEES, JSON.stringify(nextFees));
+        } catch (e) {}
+      }
+      if (nextSchedules) {
+        setFacilitySchedules(nextSchedules);
+        facilitySchedulesRef.current = nextSchedules;
+        try {
+          localStorage.setItem(STORAGE_KEY_FACILITY_SCHEDULES, JSON.stringify(nextSchedules));
+        } catch (e) {}
+      }
+      pushStateToCloud(
+        rawTenantsRef.current,
+        propertiesRef.current,
+        settingsRef.current,
+        auditEntry,
+        nextFees ?? maintenanceFeesRef.current,
+        nextSchedules ?? facilitySchedulesRef.current
+      );
+    },
+    [pushStateToCloud]
+  );
+
   const handleExportCSV = (customSubset = null) => {
     const listToExport = Array.isArray(customSubset) ? customSubset : tenants;
     exportTenantsToCSV(listToExport, 'Precourt_Luxury_Homes_Tenants_Export.csv');
@@ -1112,6 +1230,7 @@ export default function App() {
         currentUser={authUser}
         onLogout={handleLogout}
         auditLogsCount={auditLogs.length}
+        overdueMaintenanceCount={maintenanceFees.filter((f) => f.paymentStatus === 'OVERDUE').length}
       />
 
       {/* 2. Main Viewport */}
@@ -1158,6 +1277,22 @@ export default function App() {
               }}
               onFilterNavigate={handleFilterNavigate}
               auditLogs={auditLogs}
+              maintenanceFees={maintenanceFees}
+              facilitySchedules={facilitySchedules}
+            />
+          )}
+
+          {currentTab === 'maintenance-fees' && (
+            <MaintenanceFeesView
+              tenants={tenants}
+              properties={visibleProperties}
+              maintenanceFees={maintenanceFees}
+              facilitySchedules={facilitySchedules}
+              onUpdateFeesAndSchedules={handleUpdateFeesAndSchedules}
+              currentUser={authUser}
+              settings={settings}
+              onSelectTenant={(t) => setSelectedTenantId(t.id)}
+              onShowToast={showToast}
             />
           )}
 
@@ -1307,6 +1442,8 @@ export default function App() {
           tenant={selectedTenant}
           properties={visibleProperties}
           settings={settings}
+          maintenanceFees={maintenanceFees}
+          facilitySchedules={facilitySchedules}
           onClose={() => setSelectedTenantId(null)}
           onSaveInline={handleSaveInlineDrawer}
           onOpenFullEditModal={(t) => {

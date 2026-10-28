@@ -63,6 +63,7 @@ function plhPortalStateSyncPlugin() {
             urlPath.startsWith('/tenants') ||
             urlPath.startsWith('/leases') ||
             urlPath.startsWith('/finances') ||
+            urlPath.startsWith('/maintenance-fees') ||
             urlPath.startsWith('/activity-log') ||
             urlPath.startsWith('/settings') ||
             urlPath.startsWith('/admin');
@@ -238,6 +239,8 @@ function plhPortalStateSyncPlugin() {
               tenants: valid.tenants,
               properties: valid.properties,
               settings: valid.settings,
+              maintenanceFees: valid.maintenanceFees,
+              facilitySchedules: valid.facilitySchedules,
               auditLogs: mergedLogs,
               managers: existingManagers,
               updatedAt: Number(valid.updatedAt) || Date.now()

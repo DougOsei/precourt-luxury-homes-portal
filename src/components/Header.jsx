@@ -60,6 +60,12 @@ export default function Header({
           title: 'Financials & Contract Revenue',
           subtitle: 'Monthly and cumulative contract valuations in Ghanaian Cedis (GH₵) with official statements'
         };
+      case 'maintenance-fees':
+        return {
+          badge: 'OPERATIONS & ANNUAL FEES • GH₵ 3,000 / UNIT',
+          title: 'Annual Maintenance Fee & Facility Operations',
+          subtitle: 'Track GH₵ 3,000 fee collections, quarterly AC servicing, monthly water pump maintenance, and weekly waste logs'
+        };
       case 'activity-log':
         return {
           badge: 'AUDIT & ATTRIBUTION LOG',

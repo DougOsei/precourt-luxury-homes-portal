@@ -162,6 +162,48 @@ function initSchema() {
       details TEXT,
       timestamp TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS maintenance_fees (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      tenant_name TEXT NOT NULL,
+      unit_id TEXT NOT NULL,
+      property_id TEXT NOT NULL,
+      billing_year INTEGER NOT NULL DEFAULT 2026,
+      total_amount_due REAL NOT NULL DEFAULT 3000.00,
+      amount_paid REAL NOT NULL DEFAULT 0.00,
+      payment_status TEXT NOT NULL DEFAULT 'PENDING', -- PAID, PARTIALLY_PAID, PENDING, OVERDUE
+      due_date TEXT NOT NULL,
+      payment_date TEXT,
+      payment_method TEXT,
+      receipt_number TEXT,
+      installments TEXT, -- JSON array of payment installment receipts
+      notes TEXT,
+      updated_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS facility_service_schedules (
+      id TEXT PRIMARY KEY,
+      service_type TEXT NOT NULL, -- AC_SERVICING, TRASH_DISPOSAL, WATER_PUMP, COMPOUND_CLEANING
+      title TEXT NOT NULL,
+      frequency TEXT NOT NULL, -- QUARTERLY, MONTHLY, WEEKLY, DAILY
+      property_id TEXT NOT NULL, -- PLH-AM, PLH-KW, ALL
+      unit_id TEXT,
+      scheduled_date TEXT NOT NULL,
+      completed_date TEXT,
+      status TEXT NOT NULL DEFAULT 'SCHEDULED', -- SCHEDULED, IN_PROGRESS, COMPLETED, DELAYED
+      assigned_vendor TEXT,
+      staff_name TEXT,
+      cost_incurred REAL DEFAULT 0.00,
+      checklist TEXT, -- JSON array of checklist items
+      notes TEXT,
+      receipt_attachment_url TEXT,
+      logged_by_manager_id TEXT,
+      logged_by_name TEXT,
+      updated_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // Safe migrations for existing tables
