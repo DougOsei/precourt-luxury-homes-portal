@@ -726,7 +726,7 @@ export default function TenantDrawer({
                       </div>
                     </div>
 
-                    {tenantFeeRecord.receiptNumber && (
+                    {tenantFeeRecord.receiptNumber && (tenantFeeRecord.amountPaid || 0) > 0 ? (
                       <div className="flex items-center justify-between pt-1">
                         <span className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
                           Receipt: <strong className="text-slate-800 dark:text-slate-200">{tenantFeeRecord.receiptNumber}</strong>
@@ -739,6 +739,11 @@ export default function TenantDrawer({
                           <Receipt className="w-3.5 h-3.5" />
                           <span>View / Print Receipt</span>
                         </button>
+                      </div>
+                    ) : (
+                      <div className="pt-1 flex items-center justify-between text-[11px] text-slate-400">
+                        <span>No payment recorded yet for 2026.</span>
+                        <span className="font-semibold text-amber-600 dark:text-amber-400">GH₵ 3,000.00 Due</span>
                       </div>
                     )}
                   </div>

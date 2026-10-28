@@ -38,8 +38,8 @@ const STORAGE_KEY_TENANTS = 'plh_portal_tenants_v3';
 const STORAGE_KEY_PROPERTIES = 'plh_portal_properties_v3';
 const STORAGE_KEY_SETTINGS = 'plh_portal_settings_v3';
 const STORAGE_KEY_AUDIT_LOGS = 'plh_portal_audit_logs_v3';
-const STORAGE_KEY_MAINTENANCE_FEES = 'plh_portal_maintenance_fees_v3';
-const STORAGE_KEY_FACILITY_SCHEDULES = 'plh_portal_facility_schedules_v3';
+const STORAGE_KEY_MAINTENANCE_FEES = 'plh_portal_maintenance_fees_v4';
+const STORAGE_KEY_FACILITY_SCHEDULES = 'plh_portal_facility_schedules_v4';
 const STORAGE_KEY_UPDATED_AT = 'plh_portal_updated_at_v3';
 
 // Helper to recover any unsynced edits from v3, v2, or v1 localStorage keys

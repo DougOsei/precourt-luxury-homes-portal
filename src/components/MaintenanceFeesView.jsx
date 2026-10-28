@@ -31,7 +31,8 @@ import {
   ANNUAL_MAINTENANCE_FEE_AMOUNT,
   CURRENT_BILLING_YEAR,
   COVERED_FACILITY_SERVICES,
-  calculateMaintenanceFeeMetrics
+  calculateMaintenanceFeeMetrics,
+  buildInitialUnitFeeRoster
 } from '../data/maintenanceData';
 import { formatCurrency, formatDateCSV, getWhatsAppUrl } from '../utils';
 
@@ -49,10 +50,14 @@ export default function MaintenanceFeesView({
   const [searchQuery, setSearchQuery] = useState('');
   const [propertyFilter, setPropertyFilter] = useState('ALL');
 
-  // Modal States
+  // Modal States (Supports creating new payment entry or adding installment to existing fee)
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [targetFeeRecord, setTargetFeeRecord] = useState(null);
-  const [paymentAmount, setPaymentAmount] = useState('');
+  const [selectedUnitId, setSelectedUnitId] = useState('');
+  const [selectedBillingYear, setSelectedBillingYear] = useState('2026');
+  const [paymentDate, setPaymentDate] = useState(new Date().toISOString().slice(0, 10));
+  const [paymentDueDate, setPaymentDueDate] = useState('2026-03-31');
+  const [paymentAmount, setPaymentAmount] = useState('3000');
   const [paymentMethod, setPaymentMethod] = useState('bank_transfer');
   const [paymentNotes, setPaymentNotes] = useState('');
   const [receiptNumber, setReceiptNumber] = useState('');
@@ -97,27 +102,125 @@ export default function MaintenanceFeesView({
     });
   }, [maintenanceFees, statusFilter, propertyFilter, searchQuery]);
 
-  // Handle open Record Payment Modal
-  const handleOpenPaymentModal = (fee) => {
-    setTargetFeeRecord(fee);
-    const remaining = Math.max(0, fee.totalAmountDue - fee.amountPaid);
-    setPaymentAmount(String(remaining || 1500));
-    setPaymentMethod('bank_transfer');
-    setPaymentNotes('');
-    setReceiptNumber(`RCP-2026-${Math.floor(100 + Math.random() * 900)}`);
+  const activeTenants = useMemo(() => {
+    return tenants.filter((t) => !t.isVacantSlot && !String(t.id || '').startsWith('VAC-'));
+  }, [tenants]);
+
+  const handleUnitSelectChange = (unit) => {
+    setSelectedUnitId(unit);
+    const existing = maintenanceFees.find((f) => f.unitId?.toUpperCase() === unit.toUpperCase());
+    if (existing) {
+      const remaining = Math.max(0, (existing.totalAmountDue || 3000) - (existing.amountPaid || 0));
+      setPaymentAmount(String(remaining > 0 ? remaining : 3000));
+      setReceiptNumber(`RCP-2026-${unit}-${Math.floor(100 + Math.random() * 900)}`);
+    } else {
+      setPaymentAmount('3000');
+      setReceiptNumber(`RCP-2026-${unit}-${Math.floor(100 + Math.random() * 900)}`);
+    }
+  };
+
+  // Handle open Record Payment Modal (supports both brand new manual entry & adding installment)
+  const handleOpenPaymentModal = (fee = null) => {
+    if (fee) {
+      setTargetFeeRecord(fee);
+      setSelectedUnitId(fee.unitId);
+      setSelectedBillingYear(String(fee.billingYear || 2026));
+      setPaymentDueDate(fee.dueDate || '2026-03-31');
+      const remaining = Math.max(0, (fee.totalAmountDue || 3000) - (fee.amountPaid || 0));
+      setPaymentAmount(String(remaining > 0 ? remaining : 3000));
+      setPaymentMethod(fee.paymentMethod || 'bank_transfer');
+      setPaymentNotes('');
+      setReceiptNumber(`RCP-2026-${fee.unitId}-${Math.floor(100 + Math.random() * 900)}`);
+    } else {
+      setTargetFeeRecord(null);
+      const defaultT = activeTenants[0] || tenants[0];
+      const initialUnit = defaultT?.unit || 'AM-01';
+      setSelectedUnitId(initialUnit);
+      setSelectedBillingYear('2026');
+      setPaymentDueDate('2026-03-31');
+      const existing = maintenanceFees.find((f) => f.unitId?.toUpperCase() === initialUnit.toUpperCase());
+      if (existing) {
+        const remaining = Math.max(0, (existing.totalAmountDue || 3000) - (existing.amountPaid || 0));
+        setPaymentAmount(String(remaining > 0 ? remaining : 3000));
+      } else {
+        setPaymentAmount('3000');
+      }
+      setPaymentMethod('bank_transfer');
+      setPaymentNotes('');
+      setReceiptNumber(`RCP-2026-${initialUnit}-${Math.floor(100 + Math.random() * 900)}`);
+    }
+    setPaymentDate(new Date().toISOString().slice(0, 10));
     setPaymentModalOpen(true);
+  };
+
+  // Initialize all 16 units as PENDING at GH₵ 3,000 for convenience
+  const handleInitializeUnitRoster = () => {
+    if (maintenanceFees.length > 0) {
+      if (
+        !window.confirm(
+          'Initialize remaining units with PENDING status (GH₵ 3,000 due)? Existing recorded payments will be preserved.'
+        )
+      ) {
+        return;
+      }
+    }
+    const initialRoster = buildInitialUnitFeeRoster(tenants);
+    const existingUnitKeys = new Set(maintenanceFees.map((f) => f.unitId?.toUpperCase()));
+    const unrecordedUnits = initialRoster.filter(
+      (f) => !existingUnitKeys.has(f.unitId?.toUpperCase())
+    );
+    const merged = [...maintenanceFees, ...unrecordedUnits];
+
+    const auditEntry = {
+      id: `log-fee-roster-${Date.now()}`,
+      action: 'RECORD_UPDATED',
+      category: 'record_update',
+      actorId: currentUser?.id || '',
+      actorName: currentUser?.fullName || 'Douglas Amadie',
+      actorEmail: currentUser?.email || '',
+      actorRole: currentUser?.role || 'FACILITY_MANAGER',
+      targetId: 'MAINTENANCE-FEE-ROSTER',
+      targetLabel: '2026 Unit Fee Roster (16 Units)',
+      details:
+        'Initialized 2026 Annual Maintenance Fee roster for 16 units across Amamoley and Kwabenya at GH₵ 3,000.00 each.',
+      timestamp: new Date().toISOString()
+    };
+
+    onUpdateFeesAndSchedules(merged, facilitySchedules, auditEntry);
   };
 
   // Submit Payment
   const handleSubmitPayment = (e) => {
     e.preventDefault();
-    if (!targetFeeRecord) return;
     const addedAmount = Number(paymentAmount) || 0;
     if (addedAmount <= 0) return;
 
-    const newAmountPaid = (Number(targetFeeRecord.amountPaid) || 0) + addedAmount;
+    const unitKey = (targetFeeRecord?.unitId || selectedUnitId || 'AM-01').toUpperCase();
+    const existingIndex = maintenanceFees.findIndex(
+      (f) =>
+        (targetFeeRecord && f.id === targetFeeRecord.id) ||
+        (f.unitId && f.unitId.toUpperCase() === unitKey)
+    );
+
+    const matchedTenant =
+      activeTenants.find((t) => t.unit?.toUpperCase() === unitKey) ||
+      tenants.find((t) => t.unit?.toUpperCase() === unitKey);
+
+    const unitId = targetFeeRecord?.unitId || matchedTenant?.unit || selectedUnitId || 'AM-01';
+    const propertyId =
+      targetFeeRecord?.propertyId ||
+      matchedTenant?.property ||
+      (unitId.toUpperCase().startsWith('KW') ? 'PLH-KW' : 'PLH-AM');
+    const tenantName =
+      targetFeeRecord?.tenantName || matchedTenant?.name || `Resident Unit ${unitId}`;
+    const phone = targetFeeRecord?.phone || matchedTenant?.phone || '';
+    const tenantId = targetFeeRecord?.tenantId || matchedTenant?.id || '';
+
+    const prevPaid = existingIndex >= 0 ? Number(maintenanceFees[existingIndex].amountPaid) || 0 : 0;
+    const newAmountPaid = prevPaid + addedAmount;
+    const totalDue = Number(targetFeeRecord?.totalAmountDue) || 3000.0;
     const newStatus =
-      newAmountPaid >= targetFeeRecord.totalAmountDue
+      newAmountPaid >= totalDue
         ? 'PAID'
         : newAmountPaid > 0
           ? 'PARTIALLY_PAID'
@@ -126,27 +229,58 @@ export default function MaintenanceFeesView({
     const newInstallment = {
       id: `inst-${Date.now()}`,
       amount: addedAmount,
-      date: new Date().toISOString().slice(0, 10),
+      date: paymentDate || new Date().toISOString().slice(0, 10),
       method: paymentMethod,
-      receiptNumber: receiptNumber || `RCP-2026-${Date.now().toString().slice(-4)}`,
+      receiptNumber: receiptNumber || `RCP-2026-${unitId}-${Date.now().toString().slice(-4)}`,
       notes: paymentNotes || 'Maintenance fee payment installment',
       recordedBy: currentUser?.fullName || 'Douglas Amadie'
     };
 
-    const updatedFees = maintenanceFees.map((f) => {
-      if (f.id !== targetFeeRecord.id) return f;
-      return {
-        ...f,
+    let updatedFees;
+    let feeId;
+    if (existingIndex >= 0) {
+      const existing = maintenanceFees[existingIndex];
+      feeId = existing.id;
+      const updatedRecord = {
+        ...existing,
+        tenantName: existing.tenantName || tenantName,
+        phone: existing.phone || phone,
         amountPaid: newAmountPaid,
         paymentStatus: newStatus,
-        paymentDate: new Date().toISOString().slice(0, 10),
+        paymentDate: paymentDate || new Date().toISOString().slice(0, 10),
         paymentMethod: paymentMethod,
-        receiptNumber: receiptNumber || f.receiptNumber,
-        installments: [newInstallment, ...(f.installments || [])],
-        notes: paymentNotes ? `${f.notes ? f.notes + ' • ' : ''}${paymentNotes}` : f.notes,
+        receiptNumber: receiptNumber || existing.receiptNumber,
+        installments: [newInstallment, ...(existing.installments || [])],
+        notes: paymentNotes
+          ? `${existing.notes ? existing.notes + ' • ' : ''}${paymentNotes}`
+          : existing.notes,
         updatedAt: new Date().toISOString()
       };
-    });
+      updatedFees = [...maintenanceFees];
+      updatedFees[existingIndex] = updatedRecord;
+    } else {
+      feeId = `FEE-2026-${unitId.replace(/[^a-zA-Z0-9]/g, '')}`;
+      const newFeeRecord = {
+        id: feeId,
+        tenantId,
+        tenantName,
+        phone,
+        unitId,
+        propertyId,
+        billingYear: Number(selectedBillingYear) || 2026,
+        totalAmountDue: totalDue,
+        amountPaid: newAmountPaid,
+        paymentStatus: newStatus,
+        dueDate: paymentDueDate || '2026-03-31',
+        paymentDate: paymentDate || new Date().toISOString().slice(0, 10),
+        paymentMethod: paymentMethod,
+        receiptNumber: receiptNumber || `RCP-2026-${unitId}`,
+        installments: [newInstallment],
+        notes: paymentNotes || '',
+        updatedAt: new Date().toISOString()
+      };
+      updatedFees = [newFeeRecord, ...maintenanceFees];
+    }
 
     // Create Audit Log Entry
     const auditEntry = {
@@ -157,11 +291,11 @@ export default function MaintenanceFeesView({
       actorName: currentUser?.fullName || 'Douglas Amadie',
       actorEmail: currentUser?.email || '',
       actorRole: currentUser?.role || 'FACILITY_MANAGER',
-      targetId: targetFeeRecord.id,
-      targetLabel: `Maintenance Fee: ${targetFeeRecord.tenantName} (${targetFeeRecord.unitId})`,
+      targetId: feeId,
+      targetLabel: `Maintenance Fee: ${tenantName} (${unitId})`,
       details: `Recorded GH₵ ${addedAmount.toLocaleString()} payment via ${paymentMethod} (Receipt: ${
         newInstallment.receiptNumber
-      }). Total paid: GH₵ ${newAmountPaid.toLocaleString()} of GH₵ ${targetFeeRecord.totalAmountDue.toLocaleString()} (Status: ${newStatus}).`,
+      }). Total paid: GH₵ ${newAmountPaid.toLocaleString()} of GH₵ ${totalDue.toLocaleString()} (Status: ${newStatus}).`,
       timestamp: new Date().toISOString()
     };
 
@@ -298,6 +432,14 @@ export default function MaintenanceFeesView({
           </div>
 
           <div className="flex items-center gap-2.5 flex-wrap self-start lg:self-center">
+            <button
+              type="button"
+              onClick={() => handleOpenPaymentModal(null)}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Record Maintenance Payment
+            </button>
             <button
               type="button"
               onClick={handleExportCSV}
@@ -521,8 +663,35 @@ export default function MaintenanceFeesView({
                 <tbody className="divide-y divide-slate-200/60 dark:divide-slate-800/70 text-sm">
                   {filteredFees.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="py-12 text-center text-slate-400">
-                        No maintenance fee records match your current filter.
+                      <td colSpan={7} className="py-12 px-4 text-center">
+                        <div className="max-w-md mx-auto space-y-3">
+                          <div className="w-12 h-12 mx-auto rounded-2xl bg-amber-500/15 text-amber-600 dark:text-amber-400 flex items-center justify-center">
+                            <Wrench className="w-6 h-6" />
+                          </div>
+                          <h4 className="text-base font-bold text-slate-900 dark:text-white">
+                            No Maintenance Fee Payments Recorded Yet
+                          </h4>
+                          <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                            The annual fee ledger is currently empty. Facility Manager Douglas Amadie and Super Admin can enter fee payments manually as residents submit their GH₵ 3,000 annual maintenance payments.
+                          </p>
+                          <div className="pt-2 flex items-center justify-center gap-2.5 flex-wrap">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenPaymentModal(null)}
+                              className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <Plus className="w-4 h-4" />
+                              Record Maintenance Payment
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleInitializeUnitRoster}
+                              className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition cursor-pointer"
+                            >
+                              Initialize 16 Units Roster (Pending)
+                            </button>
+                          </div>
+                        </div>
                       </td>
                     </tr>
                   ) : (
@@ -909,7 +1078,7 @@ export default function MaintenanceFeesView({
       )}
 
       {/* 7. Modal: Record Payment Installment */}
-      {paymentModalOpen && targetFeeRecord && (
+      {paymentModalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs"
           style={{ overscrollBehavior: 'contain' }}
@@ -921,10 +1090,18 @@ export default function MaintenanceFeesView({
             <div className="p-5 border-b border-slate-200 dark:border-slate-800 bg-gradient-to-r from-amber-500/10 via-transparent to-transparent flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-bold text-slate-900 dark:text-white">
-                  Record Annual Maintenance Fee Payment
+                  {targetFeeRecord
+                    ? 'Record Fee Payment Installment'
+                    : 'Record Annual Maintenance Fee Payment'}
                 </h3>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                  Unit <strong>{targetFeeRecord.unitId}</strong> • {targetFeeRecord.tenantName} ({targetFeeRecord.propertyId})
+                  {targetFeeRecord ? (
+                    <>
+                      Unit <strong>{targetFeeRecord.unitId}</strong> • {targetFeeRecord.tenantName} ({targetFeeRecord.propertyId})
+                    </>
+                  ) : (
+                    'Manual Entry • Managed by Douglas Amadie / Super Admin'
+                  )}
                 </p>
               </div>
               <button
@@ -937,30 +1114,72 @@ export default function MaintenanceFeesView({
             </div>
 
             <form onSubmit={handleSubmitPayment} className="p-5 space-y-4">
-              <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-center justify-between text-xs">
+              {/* Unit selection when creating a new record */}
+              {!targetFeeRecord && (
                 <div>
-                  <span className="text-slate-400">Total Due:</span>{' '}
-                  <strong className="font-mono text-slate-900 dark:text-white">
-                    {formatCurrency(targetFeeRecord.totalAmountDue, sym)}
-                  </strong>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1">
+                    Select Apartment / Resident *
+                  </label>
+                  <select
+                    value={selectedUnitId}
+                    onChange={(e) => handleUnitSelectChange(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl text-xs font-bold bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white"
+                  >
+                    {activeTenants.map((t) => {
+                      const existing = maintenanceFees.find(
+                        (f) => f.unitId?.toUpperCase() === t.unit?.toUpperCase()
+                      );
+                      return (
+                        <option key={t.unit} value={t.unit}>
+                          Unit {t.unit} ({t.property}) — {t.name}{' '}
+                          {existing
+                            ? `(Paid: GH₵ ${Number(existing.amountPaid || 0).toLocaleString()} / Status: ${existing.paymentStatus})`
+                            : '(No payments yet — Due GH₵ 3,000)'}
+                        </option>
+                      );
+                    })}
+                  </select>
                 </div>
-                <div>
-                  <span className="text-slate-400">Already Paid:</span>{' '}
-                  <strong className="font-mono text-emerald-500">
-                    {formatCurrency(targetFeeRecord.amountPaid, sym)}
-                  </strong>
-                </div>
-                <div>
-                  <span className="text-slate-400">Remaining:</span>{' '}
-                  <strong className="font-mono text-amber-500">
-                    {formatCurrency(Math.max(0, targetFeeRecord.totalAmountDue - targetFeeRecord.amountPaid), sym)}
-                  </strong>
-                </div>
-              </div>
+              )}
+
+              {/* Summary box showing due, already paid, remaining */}
+              {(() => {
+                const currentFee =
+                  targetFeeRecord ||
+                  maintenanceFees.find(
+                    (f) => f.unitId?.toUpperCase() === (selectedUnitId || 'AM-01').toUpperCase()
+                  );
+                const totalDue = Number(currentFee?.totalAmountDue) || 3000.0;
+                const paidSoFar = Number(currentFee?.amountPaid) || 0.0;
+                const remaining = Math.max(0, totalDue - paidSoFar);
+
+                return (
+                  <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-center justify-between text-xs">
+                    <div>
+                      <span className="text-slate-400">Annual Fee Due:</span>{' '}
+                      <strong className="font-mono text-slate-900 dark:text-white">
+                        {formatCurrency(totalDue, sym)}
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="text-slate-400">Already Paid:</span>{' '}
+                      <strong className="font-mono text-emerald-500">
+                        {formatCurrency(paidSoFar, sym)}
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="text-slate-400">Balance:</span>{' '}
+                      <strong className="font-mono text-amber-500">
+                        {formatCurrency(remaining, sym)}
+                      </strong>
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1">
-                  Payment Amount (GH₵)
+                  Payment Amount to Record (GH₵) *
                 </label>
                 <input
                   type="number"
@@ -984,8 +1203,8 @@ export default function MaintenanceFeesView({
                     onChange={(e) => setPaymentMethod(e.target.value)}
                     className="w-full px-3 py-2 rounded-xl text-xs font-semibold bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white"
                   >
-                    <option value="bank_transfer">Bank Transfer</option>
-                    <option value="momo">MTN / Telecel MoMo</option>
+                    <option value="bank_transfer">Bank Transfer (GCB / Ecobank)</option>
+                    <option value="momo">MTN / Telecel Mobile Money</option>
                     <option value="cash">Cash Settlement</option>
                     <option value="cheque">Bank Cheque</option>
                   </select>
@@ -993,16 +1212,29 @@ export default function MaintenanceFeesView({
 
                 <div>
                   <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1">
-                    Receipt Number
+                    Payment Date
                   </label>
                   <input
-                    type="text"
+                    type="date"
                     required
-                    value={receiptNumber}
-                    onChange={(e) => setReceiptNumber(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl text-xs font-mono font-bold bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white"
+                    value={paymentDate}
+                    onChange={(e) => setPaymentDate(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl text-xs font-semibold bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1">
+                  Receipt / Transaction Number *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={receiptNumber}
+                  onChange={(e) => setReceiptNumber(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl text-xs font-mono font-bold bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white"
+                />
               </div>
 
               <div>
