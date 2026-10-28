@@ -48,6 +48,165 @@ const DUMMY_BCRYPT_HASH = bcrypt.hashSync('plh-timing-safe-nonexistent-user-guar
 const loginAttemptMap = new Map();
 const revokedSessionJtis = new Set();
 let memoryManagersCache = null;
+let memoryAuditLogsCache = [];
+
+function syncAuditLogsToSqlite(logs) {
+  if (!sqliteDb || !Array.isArray(logs)) return;
+  try {
+    const insert = sqliteDb.prepare(`
+      INSERT OR REPLACE INTO audit_logs (
+        id, action, category, actor_id, actor_name, actor_email, actor_role,
+        target_id, target_label, details, timestamp
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const tx = sqliteDb.transaction((items) => {
+      for (const item of items) {
+        if (!item || !item.id) continue;
+        insert.run(
+          String(item.id),
+          String(item.action || 'RECORD_UPDATED'),
+          String(item.category || 'record_update'),
+          String(item.actorId || ''),
+          String(item.actorName || 'Authenticated Manager'),
+          String(item.actorEmail || ''),
+          String(item.actorRole || 'FACILITY_MANAGER'),
+          String(item.targetId || ''),
+          String(item.targetLabel || ''),
+          String(item.details || ''),
+          String(item.timestamp || new Date().toISOString())
+        );
+      }
+    });
+    tx(logs);
+  } catch (e) {}
+}
+
+function loadAuditLogsFromSqlite() {
+  if (!sqliteDb) return [];
+  try {
+    const rows = sqliteDb
+      .prepare('SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 200')
+      .all();
+    return rows.map((r) => ({
+      id: r.id,
+      action: r.action,
+      category: r.category || 'record_update',
+      actorId: r.actor_id || '',
+      actorName: r.actor_name,
+      actorEmail: r.actor_email || '',
+      actorRole: r.actor_role || 'FACILITY_MANAGER',
+      targetId: r.target_id || '',
+      targetLabel: r.target_label || '',
+      details: r.details || '',
+      timestamp: r.timestamp
+    }));
+  } catch (e) {
+    return [];
+  }
+}
+
+function mergeAuditLogs(existingLogs = [], incomingLogs = [], newEntry = null) {
+  const map = new Map();
+  const sqliteLogs = loadAuditLogsFromSqlite();
+  const combined = [
+    ...(newEntry ? [newEntry] : []),
+    ...(Array.isArray(incomingLogs) ? incomingLogs : []),
+    ...(Array.isArray(existingLogs) ? existingLogs : []),
+    ...(Array.isArray(memoryAuditLogsCache) ? memoryAuditLogsCache : []),
+    ...sqliteLogs
+  ];
+
+  for (const item of combined) {
+    if (item && item.id && !map.has(item.id)) {
+      map.set(item.id, {
+        id: String(item.id),
+        action: String(item.action || 'RECORD_UPDATED'),
+        category: String(item.category || 'record_update'),
+        actorId: String(item.actorId || ''),
+        actorName: String(item.actorName || 'Authenticated Manager'),
+        actorEmail: String(item.actorEmail || ''),
+        actorRole: String(item.actorRole || 'FACILITY_MANAGER'),
+        targetId: String(item.targetId || ''),
+        targetLabel: String(item.targetLabel || ''),
+        details: String(item.details || ''),
+        timestamp: String(item.timestamp || new Date().toISOString())
+      });
+    }
+  }
+
+  const sorted = Array.from(map.values())
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    .slice(0, 200);
+
+  memoryAuditLogsCache = sorted;
+  syncAuditLogsToSqlite(sorted);
+  return sorted;
+}
+
+async function appendServerAuditLog(entry) {
+  if (!entry || !entry.id) return memoryAuditLogsCache;
+
+  let localLogs = [];
+  let localObj = {};
+  try {
+    if (fs.existsSync(LOCAL_STATE_FILE)) {
+      localObj = JSON.parse(fs.readFileSync(LOCAL_STATE_FILE, 'utf8'));
+      if (Array.isArray(localObj.auditLogs)) localLogs = localObj.auditLogs;
+    }
+  } catch (e) {}
+
+  const merged = mergeAuditLogs(localLogs, [], entry);
+
+  // Persist to local portal_state.json
+  try {
+    localObj.auditLogs = merged;
+    localObj.updatedAt = Math.max(Number(localObj.updatedAt) || 0, Date.now());
+    fs.mkdirSync(path.dirname(LOCAL_STATE_FILE), { recursive: true });
+    fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(localObj, null, 2), 'utf8');
+  } catch (e) {}
+
+  // Persist to Cloud Gist if configured
+  const gistId = process.env.PLH_GIST_ID;
+  const githubToken = process.env.PLH_GITHUB_TOKEN;
+  if (gistId && githubToken) {
+    try {
+      const headers = {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${githubToken}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'Precourt-Luxury-Homes-Portal'
+      };
+      const gGet = await fetch(`https://api.github.com/gists/${gistId}`, {
+        headers,
+        cache: 'no-store'
+      });
+      if (gGet.ok) {
+        const gData = await gGet.json();
+        const content = gData.files?.[GIST_FILENAME]?.content;
+        const existingGist = content ? JSON.parse(content) : {};
+        const gistMerged = mergeAuditLogs(existingGist.auditLogs || [], merged, entry);
+        const nextPayload = {
+          ...existingGist,
+          auditLogs: gistMerged,
+          updatedAt: Math.max(Number(existingGist.updatedAt) || 0, Date.now())
+        };
+        await fetch(`https://api.github.com/gists/${gistId}`, {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({
+            files: {
+              [GIST_FILENAME]: {
+                content: JSON.stringify(nextPayload, null, 2)
+              }
+            }
+          })
+        });
+      }
+    } catch (e) {}
+  }
+
+  return merged;
+}
 
 function getEncryptionKey() {
   const rawSecret =
@@ -841,6 +1000,24 @@ async function handleAuthLoginEndpoint(req, res) {
     await clearFailedLoginAttempts(ip, cleanId, managers, matchedManager);
     const sessionPayload = setAuthenticatedCookie(req, res, matchedManager);
 
+    const loginTimestamp = new Date().toISOString();
+    const loginAuditEntry = {
+      id: `log-login-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      action: 'USER_LOGIN',
+      category: 'authentication',
+      actorId: matchedManager.id,
+      actorName: matchedManager.fullName,
+      actorEmail: matchedManager.email,
+      actorRole: matchedManager.role,
+      targetId: matchedManager.id,
+      targetLabel: 'Portal Authentication',
+      details: `${matchedManager.fullName} (${
+        matchedManager.role === 'SUPER_ADMIN' ? 'Super Admin' : 'Facility Manager'
+      }) signed in and connected to live synced portal records.`,
+      timestamp: loginTimestamp
+    };
+    const auditLogs = await appendServerAuditLog(loginAuditEntry);
+
     res.statusCode = 200;
     res.end(
       JSON.stringify({
@@ -848,9 +1025,10 @@ async function handleAuthLoginEndpoint(req, res) {
         authenticated: true,
         user: sanitizeManagerForClient({
           ...matchedManager,
-          lastLoginAt: new Date().toISOString()
+          lastLoginAt: loginTimestamp
         }),
-        csrfToken: sessionPayload.csrfToken
+        csrfToken: sessionPayload.csrfToken,
+        auditLogs
       })
     );
   } catch (err) {
@@ -868,6 +1046,23 @@ async function handleAuthLogoutEndpoint(req, res) {
   if (!enforceFetchMetadataIsolation(req, res)) return;
 
   const session = getAuthenticatedSession(req);
+  if (session) {
+    await appendServerAuditLog({
+      id: `log-logout-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      action: 'USER_LOGOUT',
+      category: 'authentication',
+      actorId: session.sub || '',
+      actorName: session.fullName || 'Authenticated Manager',
+      actorEmail: session.email || '',
+      actorRole: session.role || 'FACILITY_MANAGER',
+      targetId: session.sub || '',
+      targetLabel: 'Portal Session',
+      details: `${session.fullName || 'Manager'} (${
+        session.role === 'SUPER_ADMIN' ? 'Super Admin' : 'Facility Manager'
+      }) signed out of the portal.`,
+      timestamp: new Date().toISOString()
+    });
+  }
   clearAuthenticatedCookie(req, res, session);
 
   res.statusCode = 200;
@@ -1073,6 +1268,20 @@ async function handleAdminManagersEndpoint(req, res) {
       const nextManagers = [...managers, newManager];
       await saveManagersStore(nextManagers);
 
+      await appendServerAuditLog({
+        id: `log-mgr-create-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+        action: 'MANAGER_PROVISIONED',
+        category: 'administration',
+        actorId: session.sub || '',
+        actorName: session.fullName || 'Super Admin',
+        actorEmail: session.email || '',
+        actorRole: session.role || 'SUPER_ADMIN',
+        targetId: newManager.id,
+        targetLabel: `${newManager.fullName} (${newManager.role})`,
+        details: `Provisioned new ${newManager.role} account for ${newManager.fullName} (${newManager.email}) with properties [${newManager.assignedProperties.join(', ')}].`,
+        timestamp: new Date().toISOString()
+      });
+
       res.statusCode = 201;
       res.end(
         JSON.stringify({
@@ -1116,6 +1325,19 @@ async function handleAdminManagersEndpoint(req, res) {
         };
 
         await saveManagersStore(managers);
+        await appendServerAuditLog({
+          id: `log-mgr-pw-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+          action: 'PASSWORD_RESET',
+          category: 'administration',
+          actorId: session.sub || '',
+          actorName: session.fullName || 'Super Admin',
+          actorEmail: session.email || '',
+          actorRole: session.role || 'SUPER_ADMIN',
+          targetId: managers[targetIdx].id,
+          targetLabel: managers[targetIdx].fullName,
+          details: `Rotated password credentials for ${managers[targetIdx].fullName} (${managers[targetIdx].email}).`,
+          timestamp: new Date().toISOString()
+        });
         res.statusCode = 200;
         res.end(
           JSON.stringify({
@@ -1172,6 +1394,19 @@ async function handleAdminManagersEndpoint(req, res) {
       };
 
       await saveManagersStore(managers);
+      await appendServerAuditLog({
+        id: `log-mgr-upd-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+        action: 'MANAGER_UPDATED',
+        category: 'administration',
+        actorId: session.sub || '',
+        actorName: session.fullName || 'Super Admin',
+        actorEmail: session.email || '',
+        actorRole: session.role || 'SUPER_ADMIN',
+        targetId: managers[targetIdx].id,
+        targetLabel: managers[targetIdx].fullName,
+        details: `Updated manager profile for ${managers[targetIdx].fullName}: Role=${managers[targetIdx].role}, Status=${managers[targetIdx].status}, Properties=[${(managers[targetIdx].assignedProperties || []).join(', ')}].`,
+        timestamp: new Date().toISOString()
+      });
       res.statusCode = 200;
       res.end(
         JSON.stringify({
@@ -1197,6 +1432,8 @@ module.exports = {
   buildDefaultSeededManagers,
   loadManagersStore,
   saveManagersStore,
+  mergeAuditLogs,
+  appendServerAuditLog,
   sanitizeManagerForClient,
   getAuthenticatedSession,
   requireAuth,

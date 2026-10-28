@@ -197,6 +197,22 @@ export default function TenantDrawer({
                   <span>•</span>
                   <span>{propDetails?.name || tenant.property}</span>
                 </p>
+                {tenant.lastUpdatedBy && (
+                  <p className="text-[11px] text-emerald-300/90 mt-1 flex items-center gap-1.5">
+                    <span>
+                      Last updated by <strong>{tenant.lastUpdatedBy}</strong> (
+                      {tenant.lastUpdatedByRole === 'SUPER_ADMIN'
+                        ? 'Super Admin'
+                        : 'Facility Manager'}
+                      )
+                    </span>
+                    {tenant.lastUpdatedAt && (
+                      <span className="text-slate-400">
+                        • {new Date(tenant.lastUpdatedAt).toLocaleString()}
+                      </span>
+                    )}
+                  </p>
+                )}
               </div>
             </div>
 

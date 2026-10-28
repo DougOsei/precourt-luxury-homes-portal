@@ -15,7 +15,8 @@ import {
   Sparkles,
   RotateCcw,
   UserCog,
-  LogOut
+  LogOut,
+  Activity
 } from 'lucide-react';
 import { getInitials } from '../utils';
 
@@ -32,7 +33,8 @@ export default function Sidebar({
   settings,
   onResetDemo,
   currentUser,
-  onLogout
+  onLogout,
+  auditLogsCount = 0
 }) {
   const isSuperAdmin = currentUser?.role === 'SUPER_ADMIN';
 
@@ -81,6 +83,21 @@ export default function Sidebar({
       icon: Wallet,
       badge: 'GHS',
       badgeClass: 'bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono'
+    },
+    {
+      id: 'activity-log',
+      label: 'Activity & Audit Log',
+      subtitle: 'Logins & record updates',
+      icon: Activity,
+      badge: auditLogsCount > 0 ? `${auditLogsCount}` : 'LIVE',
+      badgeClass: 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-mono'
+    },
+    {
+      id: 'settings',
+      label: 'Settings / Preferences',
+      subtitle: 'Currency & alert thresholds',
+      icon: Settings,
+      badge: null
     }
   ];
 
@@ -93,13 +110,6 @@ export default function Sidebar({
           icon: UserCog,
           badge: 'ADMIN',
           badgeClass: 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-        },
-        {
-          id: 'settings',
-          label: 'Settings / Preferences',
-          subtitle: 'Currency & alert thresholds',
-          icon: Settings,
-          badge: null
         }
       ]
     : [];

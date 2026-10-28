@@ -19,6 +19,7 @@ const {
 const {
   getAuthenticatedSession,
   requireAuth,
+  mergeAuditLogs,
   handleAuthLoginEndpoint,
   handleAuthLogoutEndpoint,
   handleAuthSessionCheckEndpoint,
@@ -62,6 +63,7 @@ function plhPortalStateSyncPlugin() {
             urlPath.startsWith('/tenants') ||
             urlPath.startsWith('/leases') ||
             urlPath.startsWith('/finances') ||
+            urlPath.startsWith('/activity-log') ||
             urlPath.startsWith('/settings') ||
             urlPath.startsWith('/admin');
 
@@ -160,8 +162,14 @@ function plhPortalStateSyncPlugin() {
                   : cloudState;
             }
 
-            if (resolvedState && fs.existsSync(path.dirname(LOCAL_STATE_FILE))) {
-              fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(resolvedState, null, 2), 'utf8');
+            if (resolvedState) {
+              resolvedState.auditLogs = mergeAuditLogs(
+                cloudState?.auditLogs || [],
+                localState?.auditLogs || []
+              );
+              if (fs.existsSync(path.dirname(LOCAL_STATE_FILE))) {
+                fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(resolvedState, null, 2), 'utf8');
+              }
             }
 
             const safeState = resolvedState ? { ...resolvedState } : null;
@@ -200,17 +208,37 @@ function plhPortalStateSyncPlugin() {
 
             const valid = parsed.data;
             let existingManagers = undefined;
+            let existingAuditLogs = [];
             if (fs.existsSync(LOCAL_STATE_FILE)) {
               try {
                 const prev = JSON.parse(fs.readFileSync(LOCAL_STATE_FILE, 'utf8'));
                 if (Array.isArray(prev.managers)) existingManagers = prev.managers;
+                if (Array.isArray(prev.auditLogs)) existingAuditLogs = prev.auditLogs;
               } catch (e) {}
             }
+
+            const verifiedAuditEntry = valid.auditEntry
+              ? {
+                  ...valid.auditEntry,
+                  actorId: session.sub || valid.auditEntry.actorId || '',
+                  actorName: session.fullName || valid.auditEntry.actorName || 'Authenticated Manager',
+                  actorEmail: session.email || valid.auditEntry.actorEmail || '',
+                  actorRole: session.role || valid.auditEntry.actorRole || 'FACILITY_MANAGER',
+                  timestamp: valid.auditEntry.timestamp || new Date().toISOString()
+                }
+              : null;
+
+            const mergedLogs = mergeAuditLogs(
+              existingAuditLogs,
+              valid.auditLogs || [],
+              verifiedAuditEntry
+            );
 
             const nextState = {
               tenants: valid.tenants,
               properties: valid.properties,
               settings: valid.settings,
+              auditLogs: mergedLogs,
               managers: existingManagers,
               updatedAt: Number(valid.updatedAt) || Date.now()
             };

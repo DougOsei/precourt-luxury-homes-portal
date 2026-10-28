@@ -60,6 +60,12 @@ export default function Header({
           title: 'Financials & Contract Revenue',
           subtitle: 'Monthly and cumulative contract valuations in Ghanaian Cedis (GH₵) with official statements'
         };
+      case 'activity-log':
+        return {
+          badge: 'AUDIT & ATTRIBUTION LOG',
+          title: 'Synced Activity & Record Update Log',
+          subtitle: 'Track who was signed in (Super Admin or Facility Manager) and every record modification across sessions'
+        };
       case 'managers':
         return {
           badge: 'SUPER ADMIN • /admin/managers',

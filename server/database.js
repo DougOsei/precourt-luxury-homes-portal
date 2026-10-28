@@ -148,6 +148,20 @@ function initSchema() {
       last_login_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id TEXT PRIMARY KEY,
+      action TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'record_update',
+      actor_id TEXT,
+      actor_name TEXT NOT NULL,
+      actor_email TEXT,
+      actor_role TEXT NOT NULL,
+      target_id TEXT,
+      target_label TEXT,
+      details TEXT,
+      timestamp TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // Safe migrations for existing tables

@@ -17,6 +17,7 @@ const {
 const {
   getAuthenticatedSession,
   requireAuth,
+  mergeAuditLogs,
   handleAuthLoginEndpoint,
   handleAuthLogoutEndpoint,
   handleAuthSessionCheckEndpoint,
@@ -163,14 +164,21 @@ app.get('/api/portal-state', async (req, res) => {
     }
 
     if (resolvedState) {
+      resolvedState.auditLogs = mergeAuditLogs(
+        cloudState?.auditLogs || [],
+        localState?.auditLogs || []
+      );
       fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(resolvedState, null, 2), 'utf8');
     }
+
+    const safeState = resolvedState ? { ...resolvedState } : null;
+    if (safeState) delete safeState.managers;
 
     res.json({
       ok: true,
       source: cloudState ? 'cloud+local' : 'local-disk',
       role: req.userSession?.role || 'property_manager',
-      state: resolvedState
+      state: safeState
     });
   } catch (err) {
     safeErrorResponse(res, err, 'GET /api/portal-state');
@@ -187,10 +195,40 @@ app.put(
 
     try {
       const valid = req.validatedBody;
+      let existingManagers = undefined;
+      let existingAuditLogs = [];
+      if (fs.existsSync(LOCAL_STATE_FILE)) {
+        try {
+          const prev = JSON.parse(fs.readFileSync(LOCAL_STATE_FILE, 'utf8'));
+          if (Array.isArray(prev.managers)) existingManagers = prev.managers;
+          if (Array.isArray(prev.auditLogs)) existingAuditLogs = prev.auditLogs;
+        } catch (e) {}
+      }
+
+      const session = req.userSession;
+      const verifiedAuditEntry = valid.auditEntry
+        ? {
+            ...valid.auditEntry,
+            actorId: session?.sub || valid.auditEntry.actorId || '',
+            actorName: session?.fullName || valid.auditEntry.actorName || 'Authenticated Manager',
+            actorEmail: session?.email || valid.auditEntry.actorEmail || '',
+            actorRole: session?.role || valid.auditEntry.actorRole || 'FACILITY_MANAGER',
+            timestamp: valid.auditEntry.timestamp || new Date().toISOString()
+          }
+        : null;
+
+      const mergedLogs = mergeAuditLogs(
+        existingAuditLogs,
+        valid.auditLogs || [],
+        verifiedAuditEntry
+      );
+
       const nextState = {
         tenants: valid.tenants,
         properties: valid.properties,
         settings: valid.settings,
+        auditLogs: mergedLogs,
+        managers: existingManagers,
         updatedAt: Number(valid.updatedAt) || Date.now()
       };
 
@@ -219,12 +257,15 @@ app.put(
         } catch (e) {}
       }
 
+      const safeState = { ...nextState };
+      delete safeState.managers;
+
       res.json({
         ok: true,
         source: syncedCloud ? 'cloud+local' : 'local-disk',
         role: req.userSession?.role || 'property_manager',
         updatedAt: nextState.updatedAt,
-        state: nextState
+        state: safeState
       });
     } catch (err) {
       safeErrorResponse(res, err, 'PUT /api/portal-state');

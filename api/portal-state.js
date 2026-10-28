@@ -7,7 +7,7 @@ const {
   scrubSensitiveLog,
   schemas
 } = require('../server/security');
-const { getAuthenticatedSession, requireAuth } = require('../server/auth');
+const { getAuthenticatedSession, requireAuth, mergeAuditLogs } = require('../server/auth');
 
 const GIST_FILENAME = 'plh_portal_state.json';
 
@@ -52,15 +52,20 @@ async function saveToGist(gistId, token, statePayload) {
   };
 
   let existingManagers = undefined;
+  let existingAuditLogs = [];
   try {
     const existing = await fetchFromGist(gistId, token);
     if (existing && Array.isArray(existing.managers)) {
       existingManagers = existing.managers;
     }
+    if (existing && Array.isArray(existing.auditLogs)) {
+      existingAuditLogs = existing.auditLogs;
+    }
   } catch (e) {}
 
   const mergedPayload = {
     ...statePayload,
+    auditLogs: mergeAuditLogs(existingAuditLogs, statePayload.auditLogs || []),
     managers: statePayload.managers || existingManagers
   };
 
@@ -121,6 +126,7 @@ module.exports = async function handler(req, res) {
       if (gistId) {
         const cloudState = await fetchFromGist(gistId, githubToken);
         if (cloudState) {
+          cloudState.auditLogs = mergeAuditLogs(cloudState.auditLogs || [], memoryCache?.auditLogs || []);
           memoryCache = cloudState;
           const safeState = { ...cloudState };
           delete safeState.managers;
@@ -133,7 +139,9 @@ module.exports = async function handler(req, res) {
         }
       }
 
-      const safeMem = memoryCache ? { ...memoryCache } : null;
+      const safeMem = memoryCache
+        ? { ...memoryCache, auditLogs: mergeAuditLogs(memoryCache.auditLogs || []) }
+        : null;
       if (safeMem) delete safeMem.managers;
       return res.status(200).json({
         ok: true,
@@ -160,10 +168,28 @@ module.exports = async function handler(req, res) {
       }
 
       const valid = parsed.data;
+      const verifiedAuditEntry = valid.auditEntry
+        ? {
+            ...valid.auditEntry,
+            actorId: session.sub || valid.auditEntry.actorId || '',
+            actorName: session.fullName || valid.auditEntry.actorName || 'Authenticated Manager',
+            actorEmail: session.email || valid.auditEntry.actorEmail || '',
+            actorRole: session.role || valid.auditEntry.actorRole || 'FACILITY_MANAGER',
+            timestamp: valid.auditEntry.timestamp || new Date().toISOString()
+          }
+        : null;
+
+      const mergedLogs = mergeAuditLogs(
+        memoryCache?.auditLogs || [],
+        valid.auditLogs || [],
+        verifiedAuditEntry
+      );
+
       const nextState = {
         tenants: valid.tenants,
         properties: valid.properties,
         settings: valid.settings,
+        auditLogs: mergedLogs,
         updatedAt: Number(valid.updatedAt) || Date.now()
       };
 
@@ -173,13 +199,15 @@ module.exports = async function handler(req, res) {
       };
 
       if (gistId && githubToken) {
-        await saveToGist(gistId, githubToken, nextState);
+        const savedGist = await saveToGist(gistId, githubToken, nextState);
+        const safeSaved = { ...savedGist };
+        delete safeSaved.managers;
         return res.status(200).json({
           ok: true,
           source: 'cloud-gist',
           role: session.role,
           updatedAt: nextState.updatedAt,
-          state: nextState
+          state: safeSaved
         });
       }
 

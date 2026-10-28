@@ -9,6 +9,7 @@ import FinancesView from './components/FinancesView';
 import SettingsView from './components/SettingsView';
 import LoginPage from './components/LoginPage';
 import ManagersAdminView from './components/ManagersAdminView';
+import ActivityLogView from './components/ActivityLogView';
 import TenantDrawer from './components/TenantDrawer';
 import TenantModal, {
   RenewLeaseModal,
@@ -31,6 +32,7 @@ import {
 const STORAGE_KEY_TENANTS = 'plh_portal_tenants_v3';
 const STORAGE_KEY_PROPERTIES = 'plh_portal_properties_v3';
 const STORAGE_KEY_SETTINGS = 'plh_portal_settings_v3';
+const STORAGE_KEY_AUDIT_LOGS = 'plh_portal_audit_logs_v3';
 const STORAGE_KEY_UPDATED_AT = 'plh_portal_updated_at_v3';
 
 // Helper to recover any unsynced edits from v3, v2, or v1 localStorage keys
@@ -56,6 +58,7 @@ function loadInitialTenantsFromLocalStorage() {
 function resolveTabFromPath(pathname) {
   const p = (pathname || '/').toLowerCase();
   if (p.startsWith('/admin/managers') || p.startsWith('/admin')) return 'managers';
+  if (p.startsWith('/activity-log') || p.startsWith('/audit')) return 'activity-log';
   if (p.startsWith('/properties')) return 'properties';
   if (p.startsWith('/tenants')) return 'tenants';
   if (p.startsWith('/leases')) return 'leases';
@@ -68,6 +71,8 @@ function resolvePathFromTab(tab) {
   switch (tab) {
     case 'managers':
       return '/admin/managers';
+    case 'activity-log':
+      return '/activity-log';
     case 'properties':
       return '/properties';
     case 'tenants':
@@ -134,10 +139,22 @@ export default function App() {
     return DEFAULT_SETTINGS;
   });
 
+  const [auditLogs, setAuditLogs] = useState(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_AUDIT_LOGS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {}
+    return [];
+  });
+
   // Track latest state in refs for cloud sync & polling
   const rawTenantsRef = useRef(rawTenants);
   const propertiesRef = useRef(properties);
   const settingsRef = useRef(settings);
+  const auditLogsRef = useRef(auditLogs);
   const isSavingRef = useRef(false);
   const lastKnownUpdatedAtRef = useRef(
     (() => {
@@ -170,58 +187,86 @@ export default function App() {
     } catch (e) {}
   }, [settings]);
 
+  useEffect(() => {
+    auditLogsRef.current = auditLogs;
+    try {
+      localStorage.setItem(STORAGE_KEY_AUDIT_LOGS, JSON.stringify(auditLogs));
+    } catch (e) {}
+  }, [auditLogs]);
+
   // Push any portal state update to /api/portal-state (Cloud + Local Server + BroadcastChannel)
-  const pushStateToCloud = useCallback(async (nextTenants, nextProps, nextSettings) => {
-    const updatedAt = Date.now();
-    lastKnownUpdatedAtRef.current = updatedAt;
-    isSavingRef.current = true;
-    setSyncStatus('syncing');
+  const pushStateToCloud = useCallback(
+    async (nextTenants, nextProps, nextSettings, auditEntry = null) => {
+      const updatedAt = Date.now();
+      lastKnownUpdatedAtRef.current = updatedAt;
+      isSavingRef.current = true;
+      setSyncStatus('syncing');
 
-    try {
-      localStorage.setItem(STORAGE_KEY_UPDATED_AT, String(updatedAt));
-    } catch (e) {}
+      const nextAuditLogs = auditEntry
+        ? [auditEntry, ...auditLogsRef.current.filter((e) => e.id !== auditEntry.id)].slice(0, 200)
+        : auditLogsRef.current;
 
-    // Broadcast immediately to other open tabs in the same browser
-    try {
-      const bc = new BroadcastChannel('plh_portal_live_sync');
-      bc.postMessage({
-        tenants: nextTenants,
-        properties: nextProps,
-        settings: nextSettings,
-        updatedAt
-      });
-      bc.close();
-    } catch (e) {}
+      if (auditEntry) {
+        setAuditLogs(nextAuditLogs);
+        auditLogsRef.current = nextAuditLogs;
+      }
 
-    try {
-      const res = await fetch('/api/portal-state', {
-        method: 'PUT',
-        credentials: 'same-origin',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(csrfTokenRef.current ? { 'X-CSRF-Token': csrfTokenRef.current } : {})
-        },
-        body: JSON.stringify({
+      try {
+        localStorage.setItem(STORAGE_KEY_UPDATED_AT, String(updatedAt));
+      } catch (e) {}
+
+      // Broadcast immediately to other open tabs in the same browser
+      try {
+        const bc = new BroadcastChannel('plh_portal_live_sync');
+        bc.postMessage({
           tenants: nextTenants,
           properties: nextProps,
           settings: nextSettings,
+          auditLogs: nextAuditLogs,
           updatedAt
-        })
-      });
-      if (res.status === 401 || res.status === 403) {
-        setToast({
-          message: 'Session expired or insufficient permissions to modify portal state.',
-          type: 'error'
         });
+        bc.close();
+      } catch (e) {}
+
+      try {
+        const res = await fetch('/api/portal-state', {
+          method: 'PUT',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(csrfTokenRef.current ? { 'X-CSRF-Token': csrfTokenRef.current } : {})
+          },
+          body: JSON.stringify({
+            tenants: nextTenants,
+            properties: nextProps,
+            settings: nextSettings,
+            auditLogs: nextAuditLogs,
+            ...(auditEntry ? { auditEntry } : {}),
+            updatedAt
+          })
+        });
+        if (res.status === 401 || res.status === 403) {
+          setToast({
+            message: 'Session expired or insufficient permissions to modify portal state.',
+            type: 'error'
+          });
+        } else if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data?.state?.auditLogs)) {
+            setAuditLogs(data.state.auditLogs);
+            auditLogsRef.current = data.state.auditLogs;
+          }
+        }
+        setSyncStatus('synced');
+      } catch (err) {
+        console.error('Failed to push portal state to cloud:', err);
+        setSyncStatus('synced');
+      } finally {
+        isSavingRef.current = false;
       }
-      setSyncStatus('synced');
-    } catch (err) {
-      console.error('Failed to push portal state to cloud:', err);
-      setSyncStatus('synced');
-    } finally {
-      isSavingRef.current = false;
-    }
-  }, []);
+    },
+    []
+  );
 
   // Pull latest portal state from /api/portal-state (syncs across Chrome, Edge, Safari, Mobile & Incognito)
   const pullStateFromCloud = useCallback(
@@ -240,8 +285,18 @@ export default function App() {
 
         if (!serverState || !Array.isArray(serverState.tenants)) {
           // Server has no state yet: upload current browser state
-          await pushStateToCloud(rawTenantsRef.current, propertiesRef.current, settingsRef.current);
+          await pushStateToCloud(
+            rawTenantsRef.current,
+            propertiesRef.current,
+            settingsRef.current
+          );
           return;
+        }
+
+        // Always synchronize auditLogs so login/logout and record update history stays live
+        if (Array.isArray(serverState.auditLogs)) {
+          setAuditLogs(serverState.auditLogs);
+          auditLogsRef.current = serverState.auditLogs;
         }
 
         const serverUpdatedAt = Number(serverState.updatedAt) || 0;
@@ -256,14 +311,20 @@ export default function App() {
             rawTenantsRef.current.map((t) => enrichTenantRecord(t, DEFAULT_SETTINGS))
           );
           if (localSerialized !== defaultSerialized) {
-            await pushStateToCloud(rawTenantsRef.current, propertiesRef.current, settingsRef.current);
+            await pushStateToCloud(
+              rawTenantsRef.current,
+              propertiesRef.current,
+              settingsRef.current
+            );
             return;
           }
         }
 
-        // Adopt server state if it is newer than local or on initial boot when server has saved updates
+        // Adopt server state whenever server is newer OR on initial login/boot when server has state
+        // This guarantees Facility Manager and Super Admin always see the exact same synced dataset
         if (
           serverUpdatedAt > localUpdatedAt ||
+          (isInitialBoot && serverUpdatedAt > 0) ||
           (isInitialBoot && localUpdatedAt === 0 && serverUpdatedAt >= 0)
         ) {
           lastKnownUpdatedAtRef.current = serverUpdatedAt;
@@ -417,6 +478,7 @@ export default function App() {
           if (Array.isArray(msg.tenants)) setRawTenants(msg.tenants);
           if (Array.isArray(msg.properties)) setProperties(msg.properties);
           if (msg.settings) setSettings(msg.settings);
+          if (Array.isArray(msg.auditLogs)) setAuditLogs(msg.auditLogs);
         }
       };
     } catch (e) {}
@@ -514,31 +576,13 @@ export default function App() {
     setToast({ message, type });
   };
 
-  // Scope properties & tenants according to RBAC role & assignedProperties
-  const visibleProperties = useMemo(() => {
-    if (!authUser || authUser.role === 'SUPER_ADMIN') return properties;
-    const assigned = Array.isArray(authUser.assignedProperties) ? authUser.assignedProperties : [];
-    if (assigned.length === 0) return properties;
-    return properties.filter(
-      (p) =>
-        assigned.includes(p.id) ||
-        (assigned.includes('PLH-AM') && p.name?.toLowerCase().includes('amamoley')) ||
-        (assigned.includes('PLH-KW') && p.name?.toLowerCase().includes('kwabenya'))
-    );
-  }, [properties, authUser]);
+  // Both Super Admin and Facility Manager access the full synced property & tenant dataset
+  const visibleProperties = useMemo(() => properties, [properties]);
 
   // Enrich all tenant records dynamically (auto-updates daysToExpiry, rentStatus, expiryAlert, progress for ≤90 days)
   const tenants = useMemo(() => {
-    const allEnriched = rawTenants.map((t) => enrichTenantRecord(t, settings));
-    if (!authUser || authUser.role === 'SUPER_ADMIN') return allEnriched;
-    const assigned = Array.isArray(authUser.assignedProperties) ? authUser.assignedProperties : [];
-    if (assigned.length === 0) return allEnriched;
-    return allEnriched.filter(
-      (t) =>
-        (assigned.includes('PLH-AM') && t.property?.toLowerCase().includes('amamoley')) ||
-        (assigned.includes('PLH-KW') && t.property?.toLowerCase().includes('kwabenya'))
-    );
-  }, [rawTenants, settings, autoTick, authUser]);
+    return rawTenants.map((t) => enrichTenantRecord(t, settings));
+  }, [rawTenants, settings, autoTick]);
 
   // Compute Executive KPI Metrics
   const metrics = useMemo(() => {
@@ -547,7 +591,7 @@ export default function App() {
 
     const occupiedUnits = leased.length;
     const configuredTotal = visibleProperties.reduce((sum, p) => sum + (Number(p.totalUnits) || 8), 0);
-    const totalUnits = Math.max(configuredTotal || 8, occupiedUnits + vacant.length);
+    const totalUnits = Math.max(configuredTotal || 16, occupiedUnits + vacant.length);
     const vacantUnits = Math.max(0, totalUnits - occupiedUnits);
     const occupancyRate = totalUnits > 0 ? Math.round((occupiedUnits / totalUnits) * 100) : 0;
 
@@ -594,6 +638,36 @@ export default function App() {
     () => tenants.find((t) => t.id === selectedTenantId) || null,
     [tenants, selectedTenantId]
   );
+
+  // Build an attribution stamp and audit log entry for the currently logged-in user
+  const createAuditEntry = useCallback(
+    ({ action, category = 'record_update', targetId = '', targetLabel = '', details = '' }) => {
+      const nowIso = new Date().toISOString();
+      return {
+        id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        action,
+        category,
+        actorId: authUser?.id || '',
+        actorName: authUser?.fullName || 'Authenticated Manager',
+        actorEmail: authUser?.email || '',
+        actorRole: authUser?.role || 'FACILITY_MANAGER',
+        targetId,
+        targetLabel,
+        details,
+        timestamp: nowIso
+      };
+    },
+    [authUser]
+  );
+
+  const getActorStamp = useCallback(() => {
+    return {
+      lastUpdatedBy: authUser?.fullName || 'Authenticated Manager',
+      lastUpdatedByEmail: authUser?.email || '',
+      lastUpdatedByRole: authUser?.role || 'FACILITY_MANAGER',
+      lastUpdatedAt: new Date().toISOString()
+    };
+  }, [authUser]);
 
   const handleLoginSuccess = (user, nextCsrfToken, redirectPath = '/dashboard') => {
     setAuthUser(user);
@@ -644,7 +718,7 @@ export default function App() {
   };
 
   // Helper to commit tenant list updates and sync to Cloud + all browsers/Incognito immediately
-  const commitTenantsUpdate = (updaterFn) => {
+  const commitTenantsUpdate = (updaterFn, auditEntry = null) => {
     if (!authUser || (authUser.role !== 'SUPER_ADMIN' && authUser.role !== 'FACILITY_MANAGER')) {
       showToast('Authentication required to modify tenant records.', 'error');
       return false;
@@ -652,14 +726,59 @@ export default function App() {
     setRawTenants((prev) => {
       const nextRaw = typeof updaterFn === 'function' ? updaterFn(prev) : updaterFn;
       const nextEnriched = nextRaw.map((t) => enrichTenantRecord(t, settingsRef.current));
-      pushStateToCloud(nextEnriched, propertiesRef.current, settingsRef.current);
+      pushStateToCloud(nextEnriched, propertiesRef.current, settingsRef.current, auditEntry);
       return nextEnriched;
     });
     return true;
   };
 
+  // Helper to summarize field-level changes between old and updated tenant record
+  const buildTenantDiffSummary = (oldRecord, newRecord) => {
+    if (!oldRecord) {
+      return `Registered ${newRecord.name} in Unit ${newRecord.unit} (${newRecord.property}) at GH₵${Number(newRecord.monthlyRent || 0).toLocaleString()}/mo.`;
+    }
+    const changes = [];
+    if (oldRecord.name !== newRecord.name) changes.push(`Name: "${oldRecord.name}" → "${newRecord.name}"`);
+    if (oldRecord.unit !== newRecord.unit) changes.push(`Unit: ${oldRecord.unit} → ${newRecord.unit}`);
+    if (Number(oldRecord.monthlyRent) !== Number(newRecord.monthlyRent)) {
+      changes.push(
+        `Monthly Rent: GH₵${Number(oldRecord.monthlyRent || 0).toLocaleString()} → GH₵${Number(
+          newRecord.monthlyRent || 0
+        ).toLocaleString()}`
+      );
+    }
+    if (oldRecord.contractStart !== newRecord.contractStart || oldRecord.contractEnd !== newRecord.contractEnd) {
+      changes.push(
+        `Lease Period: ${formatDateCSV(newRecord.contractStart)} to ${formatDateCSV(newRecord.contractEnd)}`
+      );
+    }
+    if ((oldRecord.phone || '') !== (newRecord.phone || '')) {
+      changes.push(`Phone: ${newRecord.phone || 'Cleared'}`);
+    }
+    if ((oldRecord.notes || '') !== (newRecord.notes || '')) {
+      changes.push('Updated tenancy notes');
+    }
+    return changes.length > 0
+      ? `Updated ${newRecord.name} (Unit ${newRecord.unit}): ${changes.join('; ')}`
+      : `Saved updates for ${newRecord.name} (Unit ${newRecord.unit})`;
+  };
+
   // Handlers for CRUD & Lease Actions
   const handleSaveTenantModal = (formData) => {
+    const stamp = getActorStamp();
+    const isExistingEdit = Boolean(editingTenant && !editingTenant.isVacantSlot);
+    const auditEntry = createAuditEntry({
+      action: isExistingEdit ? 'TENANT_UPDATED' : 'TENANT_CREATED',
+      category: 'record_update',
+      targetId: formData.id,
+      targetLabel: `${formData.name} (${formData.id} • Unit ${formData.unit})`,
+      details: isExistingEdit
+        ? buildTenantDiffSummary(editingTenant, formData)
+        : `Registered new tenant ${formData.name} in Unit ${formData.unit} (${formData.property}) — Monthly Rent GH₵${Number(
+            formData.monthlyRent || 0
+          ).toLocaleString()}`
+    });
+
     commitTenantsUpdate((prev) => {
       // If converting a vacant slot into an occupied tenant record
       if (formData.originalVacantId) {
@@ -668,6 +787,7 @@ export default function App() {
             ? {
                 ...item,
                 ...formData,
+                ...stamp,
                 isVacantSlot: false,
                 rentStatus: 'Active',
                 paymentStatus: 'Paid in Full',
@@ -694,6 +814,7 @@ export default function App() {
             ? {
                 ...item,
                 ...formData,
+                ...stamp,
                 isVacantSlot: false,
                 monthlyRent: Number(formData.monthlyRent) || 0,
                 durationMonths: Number(formData.durationMonths) || 12,
@@ -712,6 +833,7 @@ export default function App() {
           item.id === matchingVacant.id
             ? {
                 ...formData,
+                ...stamp,
                 isVacantSlot: false,
                 rentStatus: 'Active',
                 paymentStatus: 'Paid in Full',
@@ -734,6 +856,7 @@ export default function App() {
       return [
         {
           ...formData,
+          ...stamp,
           isVacantSlot: false,
           rentStatus: 'Active',
           paymentStatus: 'Paid in Full',
@@ -751,7 +874,7 @@ export default function App() {
         },
         ...prev
       ];
-    });
+    }, auditEntry);
 
     setSelectedTenantId(formData.id);
     showToast(
@@ -763,39 +886,75 @@ export default function App() {
   };
 
   const handleSaveInlineDrawer = (updatedTenant) => {
-    commitTenantsUpdate((prev) =>
-      prev.map((item) => (item.id === selectedTenantId ? { ...item, ...updatedTenant, isVacantSlot: false } : item))
+    const stamp = getActorStamp();
+    const oldTenant = rawTenantsRef.current.find((t) => t.id === selectedTenantId);
+    const auditEntry = createAuditEntry({
+      action: 'TENANT_UPDATED',
+      category: 'record_update',
+      targetId: updatedTenant.id,
+      targetLabel: `${updatedTenant.name} (${updatedTenant.id} • Unit ${updatedTenant.unit})`,
+      details: buildTenantDiffSummary(oldTenant, updatedTenant)
+    });
+
+    commitTenantsUpdate(
+      (prev) =>
+        prev.map((item) =>
+          item.id === selectedTenantId
+            ? { ...item, ...updatedTenant, ...stamp, isVacantSlot: false }
+            : item
+        ),
+      auditEntry
     );
     setSelectedTenantId(updatedTenant.id);
     showToast(`Saved & synced changes for ${updatedTenant.name} (${updatedTenant.id})`, 'success');
   };
 
   const handleConfirmRenewLease = (tenant, renewalDetails) => {
-    commitTenantsUpdate((prev) =>
-      prev.map((item) => {
-        if (item.id !== tenant.id) return item;
-        const historyEntry = {
-          date: renewalDetails.contractStart,
-          period: `${formatDateCSV(renewalDetails.contractStart)} to ${formatDateCSV(renewalDetails.contractEnd)}`,
-          months: renewalDetails.durationMonths,
-          monthlyRent: renewalDetails.monthlyRent,
-          totalRent: renewalDetails.totalRent,
-          type: `Renewed (${renewalDetails.durationMonths} Months)`
-        };
-        return {
-          ...item,
-          contractStart: renewalDetails.contractStart,
-          contractEnd: renewalDetails.contractEnd,
-          durationMonths: renewalDetails.durationMonths,
-          monthlyRent: renewalDetails.monthlyRent,
-          totalRent: renewalDetails.totalRent,
-          renewalDate: renewalDetails.renewalDate,
-          notes: renewalDetails.notes || item.notes,
-          rentStatus: 'Active',
-          expiryAlert: 'OK',
-          renewalHistory: [historyEntry, ...(item.renewalHistory || [])]
-        };
-      })
+    const stamp = getActorStamp();
+    const auditEntry = createAuditEntry({
+      action: 'LEASE_RENEWED',
+      category: 'record_update',
+      targetId: tenant.id,
+      targetLabel: `${tenant.name} (${tenant.id} • Unit ${tenant.unit})`,
+      details: `Renewed lease for ${tenant.name} (Unit ${tenant.unit}) for ${
+        renewalDetails.durationMonths
+      } months (${formatDateCSV(renewalDetails.contractStart)} to ${formatDateCSV(
+        renewalDetails.contractEnd
+      )}) at GH₵${Number(renewalDetails.monthlyRent || 0).toLocaleString()}/mo.`
+    });
+
+    commitTenantsUpdate(
+      (prev) =>
+        prev.map((item) => {
+          if (item.id !== tenant.id) return item;
+          const historyEntry = {
+            date: renewalDetails.contractStart,
+            period: `${formatDateCSV(renewalDetails.contractStart)} to ${formatDateCSV(
+              renewalDetails.contractEnd
+            )}`,
+            months: renewalDetails.durationMonths,
+            monthlyRent: renewalDetails.monthlyRent,
+            totalRent: renewalDetails.totalRent,
+            type: `Renewed (${renewalDetails.durationMonths} Months by ${
+              authUser?.fullName || 'Manager'
+            })`
+          };
+          return {
+            ...item,
+            ...stamp,
+            contractStart: renewalDetails.contractStart,
+            contractEnd: renewalDetails.contractEnd,
+            durationMonths: renewalDetails.durationMonths,
+            monthlyRent: renewalDetails.monthlyRent,
+            totalRent: renewalDetails.totalRent,
+            renewalDate: renewalDetails.renewalDate,
+            notes: renewalDetails.notes || item.notes,
+            rentStatus: 'Active',
+            expiryAlert: 'OK',
+            renewalHistory: [historyEntry, ...(item.renewalHistory || [])]
+          };
+        }),
+      auditEntry
     );
     showToast(
       `Lease renewed & synced for ${tenant.name} (${tenant.unit}) until ${formatDateCSV(renewalDetails.contractEnd)}`,
@@ -807,32 +966,44 @@ export default function App() {
     if (!window.confirm(`Remove tenant record "${tenant.name}" (${tenant.id}) and mark Unit ${tenant.unit} as Vacant?`)) {
       return;
     }
-    commitTenantsUpdate((prev) =>
-      prev.map((item) =>
-        item.id === tenant.id
-          ? {
-              id: `VAC-${tenant.unit}`,
-              name: 'Vacant Unit — No Contract',
-              phone: '',
-              whatsapp: '',
-              email: '',
-              property: tenant.property,
-              unit: tenant.unit,
-              contractStart: '',
-              contractEnd: '',
-              monthlyRent: tenant.monthlyRent,
-              durationMonths: 0,
-              totalRent: 0,
-              renewalDate: '',
-              rentStatus: 'No Contract',
-              daysToExpiry: null,
-              expiryAlert: 'No Contract',
-              notes: `Vacated by ${tenant.name}. Available for new lease.`,
-              isVacantSlot: true,
-              renewalHistory: []
-            }
-          : item
-      )
+    const stamp = getActorStamp();
+    const auditEntry = createAuditEntry({
+      action: 'UNIT_VACATED',
+      category: 'record_update',
+      targetId: tenant.id,
+      targetLabel: `${tenant.name} (${tenant.id} • Unit ${tenant.unit})`,
+      details: `Removed tenant ${tenant.name} and marked Unit ${tenant.unit} (${tenant.property}) as Vacant.`
+    });
+
+    commitTenantsUpdate(
+      (prev) =>
+        prev.map((item) =>
+          item.id === tenant.id
+            ? {
+                id: `VAC-${tenant.unit}`,
+                name: 'Vacant Unit — No Contract',
+                phone: '',
+                whatsapp: '',
+                email: '',
+                property: tenant.property,
+                unit: tenant.unit,
+                contractStart: '',
+                contractEnd: '',
+                monthlyRent: tenant.monthlyRent,
+                durationMonths: 0,
+                totalRent: 0,
+                renewalDate: '',
+                rentStatus: 'No Contract',
+                daysToExpiry: null,
+                expiryAlert: 'No Contract',
+                notes: `Vacated by ${tenant.name}. Available for new lease.`,
+                isVacantSlot: true,
+                ...stamp,
+                renewalHistory: []
+              }
+            : item
+        ),
+      auditEntry
     );
     if (selectedTenantId === tenant.id) {
       setSelectedTenantId(null);
@@ -852,19 +1023,37 @@ export default function App() {
       showToast('Could not parse valid tenant rows from the provided CSV', 'error');
       return;
     }
+    const stamp = getActorStamp();
+    const auditEntry = createAuditEntry({
+      action: 'CSV_IMPORTED',
+      category: 'record_update',
+      targetId: 'CSV-IMPORT',
+      targetLabel: `CSV Batch Import (${imported.length} records)`,
+      details: `Imported and synchronized ${imported.length} tenant contracts from CSV file.`
+    });
     const defaultVacant = INITIAL_TENANTS.filter((t) => t.isVacantSlot);
-    commitTenantsUpdate([...imported, ...defaultVacant]);
+    commitTenantsUpdate(
+      [...imported.map((t) => ({ ...t, ...stamp })), ...defaultVacant],
+      auditEntry
+    );
     showToast(`Successfully ingested & synced ${imported.length} tenant contracts from CSV!`, 'success');
   };
 
   const handleResetDemo = () => {
     if (!window.confirm('Reset Precourt Luxury Homes portal back to the initial 16-tenant CSV dataset?')) return;
+    const auditEntry = createAuditEntry({
+      action: 'TENANT_UPDATED',
+      category: 'record_update',
+      targetId: 'PORTAL-RESET',
+      targetLabel: 'Initial 16-Unit Dataset Reset',
+      details: 'Reset portal records to the default 16-unit Amamoley & Kwabenya dataset.'
+    });
     const resetTenants = INITIAL_TENANTS.map((t) => enrichTenantRecord(t, DEFAULT_SETTINGS));
     setRawTenants(resetTenants);
     setProperties(INITIAL_PROPERTIES);
     setSettings(DEFAULT_SETTINGS);
     setSelectedTenantId(null);
-    pushStateToCloud(resetTenants, INITIAL_PROPERTIES, DEFAULT_SETTINGS);
+    pushStateToCloud(resetTenants, INITIAL_PROPERTIES, DEFAULT_SETTINGS, auditEntry);
     showToast('Portal reset & synced across all browsers to initial CSV dataset', 'success');
   };
 
@@ -922,6 +1111,7 @@ export default function App() {
         onResetDemo={handleResetDemo}
         currentUser={authUser}
         onLogout={handleLogout}
+        auditLogsCount={auditLogs.length}
       />
 
       {/* 2. Main Viewport */}
@@ -967,6 +1157,7 @@ export default function App() {
                 setRenewModalOpen(true);
               }}
               onFilterNavigate={handleFilterNavigate}
+              auditLogs={auditLogs}
             />
           )}
 
@@ -1053,6 +1244,19 @@ export default function App() {
             />
           )}
 
+          {currentTab === 'activity-log' && (
+            <ActivityLogView
+              auditLogs={auditLogs}
+              currentUser={authUser}
+              tenants={tenants}
+              onSelectTenant={(t) => setSelectedTenantId(t.id)}
+              onForceSync={() => {
+                pullStateFromCloud(false);
+                showToast('Refreshed latest activity log & records from cloud', 'info');
+              }}
+            />
+          )}
+
           {currentTab === 'managers' && authUser?.role === 'SUPER_ADMIN' && (
             <ManagersAdminView
               currentUser={authUser}
@@ -1065,15 +1269,22 @@ export default function App() {
             <SettingsView
               settings={settings}
               onUpdateSettings={(next) => {
-                if (authUser?.role !== 'SUPER_ADMIN') {
-                  showToast(
-                    'Restricted Action: Only SUPER_ADMIN can modify global system settings.',
-                    'error'
-                  );
-                  return;
-                }
+                const auditEntry = createAuditEntry({
+                  action: 'SETTINGS_UPDATED',
+                  category: 'record_update',
+                  targetId: 'PORTAL-SETTINGS',
+                  targetLabel: 'Portal Preferences & Alert Thresholds',
+                  details: `Updated portal preferences (Expiry warning threshold: ${
+                    next.expiryWarningThresholdDays || 90
+                  } days, Currency: ${next.currencyCode || 'GHS'}).`
+                });
                 setSettings(next);
-                pushStateToCloud(rawTenantsRef.current, propertiesRef.current, next);
+                pushStateToCloud(
+                  rawTenantsRef.current,
+                  propertiesRef.current,
+                  next,
+                  auditEntry
+                );
                 showToast('Portal preferences saved & synced across all browsers', 'success');
               }}
               colorSchemePref={colorSchemePref}
@@ -1081,7 +1292,7 @@ export default function App() {
               onExportCSV={() => handleExportCSV(tenants)}
               onImportCSVText={handleImportCSVText}
               onResetDemo={handleResetDemo}
-              userRole={authUser?.role === 'SUPER_ADMIN' ? 'property_manager' : 'FACILITY_MANAGER'}
+              userRole="property_manager"
               sessionCookieType={sessionCookieType}
               onSwitchRole={handleSwitchRole}
               onClearSessionData={handleClearSessionData}

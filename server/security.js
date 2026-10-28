@@ -413,7 +413,27 @@ const PortalTenantRecordSchema = z
     paymentStatus: optStr(80),
     amountPaid: z.coerce.number().min(0).max(100_000_000).optional().default(0),
     isVacantSlot: z.boolean().optional().default(false),
+    lastUpdatedBy: optStr(120),
+    lastUpdatedByEmail: optStr(160),
+    lastUpdatedByRole: optStr(60),
+    lastUpdatedAt: optStr(60),
     renewalHistory: z.array(RenewalHistoryItemSchema).max(50).optional().default([])
+  })
+  .passthrough();
+
+const AuditLogEntrySchema = z
+  .object({
+    id: cleanStr(80),
+    action: cleanStr(80),
+    category: optStr(60),
+    actorId: optStr(80),
+    actorName: cleanStr(120),
+    actorEmail: optStr(160),
+    actorRole: optStr(60),
+    targetId: optStr(80),
+    targetLabel: optStr(200),
+    details: optStr(1000),
+    timestamp: cleanStr(60)
   })
   .passthrough();
 
@@ -459,6 +479,8 @@ const PortalStatePayloadSchema = z.object({
   tenants: z.array(PortalTenantRecordSchema).min(1).max(200),
   properties: z.array(PortalPropertyRecordSchema).max(50).optional(),
   settings: PortalSettingsSchema.optional(),
+  auditLogs: z.array(AuditLogEntrySchema).max(250).optional(),
+  auditEntry: AuditLogEntrySchema.optional(),
   updatedAt: z.coerce.number().optional()
 });
 
