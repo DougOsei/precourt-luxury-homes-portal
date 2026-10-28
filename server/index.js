@@ -1871,6 +1871,8 @@ app.get('/api/export/backup', (req, res) => {
 });
 
 app.post('/api/seed/reset', (req, res) => {
+  const session = requireAuth(req, res, ['SUPER_ADMIN']);
+  if (!session) return;
   try {
     db.exec(`
       DELETE FROM payments;

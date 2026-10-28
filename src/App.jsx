@@ -1427,7 +1427,8 @@ export default function App() {
               onExportCSV={() => handleExportCSV(tenants)}
               onImportCSVText={handleImportCSVText}
               onResetDemo={handleResetDemo}
-              userRole="property_manager"
+              currentUser={authUser}
+              userRole={authUser?.role === 'SUPER_ADMIN' ? 'SUPER_ADMIN' : 'FACILITY_MANAGER'}
               sessionCookieType={sessionCookieType}
               onSwitchRole={handleSwitchRole}
               onClearSessionData={handleClearSessionData}

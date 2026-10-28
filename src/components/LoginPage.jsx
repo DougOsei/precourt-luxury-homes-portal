@@ -190,13 +190,6 @@ export default function LoginPage({
     }
   };
 
-  const fillQuickAccount = (emailVal, passVal) => {
-    setIdentifier(emailVal);
-    setPassword(passVal);
-    setErrorMsg('');
-    setFieldErrors({});
-  };
-
   return (
     <div className="min-h-screen flex flex-col justify-center items-center px-4 py-10 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 relative overflow-hidden">
       {/* Subtle luxury background glow */}
@@ -298,7 +291,7 @@ export default function LoginPage({
                     id="identifier-hint"
                     className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1.5"
                   >
-                    e.g. douglas.amadie@precourtluxury.com or admin@precourtluxury.com
+                    Enter your authorized staff or administrator credentials
                   </span>
                   <div className="relative">
                     <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -318,7 +311,7 @@ export default function LoginPage({
                       onBlur={handleInputBlur}
                       aria-describedby="identifier-hint"
                       aria-errormessage="identifier-error"
-                      placeholder="you@precourtluxury.com"
+                      placeholder="Enter registered email or username"
                       className="w-full pl-10 pr-4 py-2.5 text-sm bg-slate-50 dark:bg-slate-800/90 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 transition"
                     />
                   </div>
@@ -386,51 +379,16 @@ export default function LoginPage({
                 </button>
               </form>
 
-              {/* Secondary Content Placed Underneath Sign In Button per autofill-sign-in-form */}
-              <div className="mt-6 pt-5 border-t border-slate-200/80 dark:border-slate-800/80 space-y-3">
-                <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
-                  <span className="font-bold uppercase tracking-wider flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-                    <Sparkles className="w-3.5 h-3.5" /> Seeded Role Accounts
-                  </span>
-                  <span>Click to autofill</span>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      fillQuickAccount('douglas.amadie@precourtluxury.com', 'DouglasPLH@2026!')
-                    }
-                    className="p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-emerald-500/50 bg-slate-50/70 dark:bg-slate-800/50 text-left transition cursor-pointer"
-                  >
-                    <div className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
-                      FACILITY_MANAGER
-                    </div>
-                    <div className="text-xs font-bold text-slate-900 dark:text-white truncate mt-0.5">
-                      Douglas Amadie
-                    </div>
-                    <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 truncate">
-                      douglas.amadie@precourtluxury.com
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      fillQuickAccount('admin@precourtluxury.com', 'PrecourtAdmin@2026!')
-                    }
-                    className="p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-amber-500/50 bg-slate-50/70 dark:bg-slate-800/50 text-left transition cursor-pointer"
-                  >
-                    <div className="text-[10px] font-extrabold uppercase tracking-wider text-amber-600 dark:text-amber-400">
-                      SUPER_ADMIN
-                    </div>
-                    <div className="text-xs font-bold text-slate-900 dark:text-white truncate mt-0.5">
-                      Kwame Mensah
-                    </div>
-                    <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 truncate">
-                      admin@precourtluxury.com
-                    </div>
-                  </button>
+              {/* Authorized Personnel Notice (No demo access or credential leakage) */}
+              <div className="mt-6 pt-5 border-t border-slate-200/80 dark:border-slate-800/80">
+                <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400 flex items-start gap-2.5">
+                  <ShieldCheck className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+                  <div className="leading-relaxed">
+                    <strong className="text-slate-800 dark:text-slate-200 block font-bold mb-0.5">
+                      Restricted Access Gateway
+                    </strong>
+                    Only registered Precourt Luxury Homes staff and Super Admins may log in. Strangers and unauthorized users are prohibited. All access attempts are rate-limited, audited, and logged.
+                  </div>
                 </div>
               </div>
             </>

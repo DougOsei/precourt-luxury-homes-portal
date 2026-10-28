@@ -289,13 +289,15 @@ export default function ReportsView({ onShowToast, onResetData }) {
               <Download className="w-3.5 h-3.5" />
               Download Backup JSON
             </a>
-            <button
-              onClick={onResetData}
-              className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-bold text-amber-800 bg-amber-100 hover:bg-amber-200 rounded-xl transition"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              Reset Demo Data
-            </button>
+            {onResetData && (
+              <button
+                onClick={onResetData}
+                className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-bold text-amber-800 bg-amber-100 hover:bg-amber-200 rounded-xl transition"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Reset Data
+              </button>
+            )}
           </div>
         </div>
 

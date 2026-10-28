@@ -289,16 +289,6 @@ export default function Sidebar({
                 </>
               )}
             </button>
-
-            {(!collapsed || mobileOpen) && (
-              <button
-                onClick={onResetDemo}
-                className="p-2 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-amber-300 border border-slate-800 transition cursor-pointer"
-                title="Reset Demo Data to Initial CSV"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-              </button>
-            )}
           </div>
 
           {/* Authenticated Manager Profile Summary & Sign Out */}
