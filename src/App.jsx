@@ -7,6 +7,8 @@ import TenantsView from './components/TenantsView';
 import LeasesView from './components/LeasesView';
 import FinancesView from './components/FinancesView';
 import SettingsView from './components/SettingsView';
+import LoginPage from './components/LoginPage';
+import ManagersAdminView from './components/ManagersAdminView';
 import TenantDrawer from './components/TenantDrawer';
 import TenantModal, {
   RenewLeaseModal,
@@ -51,16 +53,54 @@ function loadInitialTenantsFromLocalStorage() {
   return INITIAL_TENANTS.map((t) => enrichTenantRecord(t, DEFAULT_SETTINGS));
 }
 
+function resolveTabFromPath(pathname) {
+  const p = (pathname || '/').toLowerCase();
+  if (p.startsWith('/admin/managers') || p.startsWith('/admin')) return 'managers';
+  if (p.startsWith('/properties')) return 'properties';
+  if (p.startsWith('/tenants')) return 'tenants';
+  if (p.startsWith('/leases')) return 'leases';
+  if (p.startsWith('/finances')) return 'finances';
+  if (p.startsWith('/settings')) return 'settings';
+  return 'dashboard';
+}
+
+function resolvePathFromTab(tab) {
+  switch (tab) {
+    case 'managers':
+      return '/admin/managers';
+    case 'properties':
+      return '/properties';
+    case 'tenants':
+      return '/tenants';
+    case 'leases':
+      return '/leases';
+    case 'finances':
+      return '/finances';
+    case 'settings':
+      return '/settings';
+    default:
+      return '/dashboard';
+  }
+}
+
 export default function App() {
-  const [currentTab, setCurrentTab] = useState('dashboard');
+  const [currentTab, setCurrentTabState] = useState(() =>
+    typeof window !== 'undefined' ? resolveTabFromPath(window.location.pathname) : 'dashboard'
+  );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const [autoTick, setAutoTick] = useState(0);
   const [syncStatus, setSyncStatus] = useState('synced'); // 'synced' | 'syncing'
-  // RBAC role is read exclusively from the server's signed HttpOnly cookie session (never localStorage)
-  const [userRole, setUserRole] = useState('property_manager');
-  const [sessionCookieType, setSessionCookieType] = useState('HttpOnly; SameSite=Lax');
+
+  // Authentication & RBAC state read exclusively from encrypted HttpOnly cookie session
+  const [authChecking, setAuthChecking] = useState(true);
+  const [authUser, setAuthUser] = useState(null);
+  const [csrfToken, setCsrfToken] = useState('');
+  const [sessionCookieType, setSessionCookieType] = useState(
+    'AES-256-GCM; HttpOnly; SameSite=Lax'
+  );
+  const csrfTokenRef = useRef('');
 
   // Directory cross-navigation filter state
   const [directoryInitialFilters, setDirectoryInitialFilters] = useState(null);
@@ -157,7 +197,10 @@ export default function App() {
       const res = await fetch('/api/portal-state', {
         method: 'PUT',
         credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(csrfTokenRef.current ? { 'X-CSRF-Token': csrfTokenRef.current } : {})
+        },
         body: JSON.stringify({
           tenants: nextTenants,
           properties: nextProps,
@@ -165,9 +208,9 @@ export default function App() {
           updatedAt
         })
       });
-      if (res.status === 403) {
+      if (res.status === 401 || res.status === 403) {
         setToast({
-          message: 'Access Denied: Read-only Tenant Viewer session cannot modify portal records.',
+          message: 'Session expired or insufficient permissions to modify portal state.',
           type: 'error'
         });
       }
@@ -193,9 +236,6 @@ export default function App() {
         });
         if (!res.ok) return;
         const data = await res.json();
-        if (data?.role) {
-          setUserRole(data.role);
-        }
         const serverState = data?.state;
 
         if (!serverState || !Array.isArray(serverState.tenants)) {
@@ -255,6 +295,41 @@ export default function App() {
     [pushStateToCloud]
   );
 
+  // Sync csrfTokenRef
+  useEffect(() => {
+    csrfTokenRef.current = csrfToken;
+  }, [csrfToken]);
+
+  // Role-aware navigation & History API synchronization
+  const setCurrentTab = useCallback(
+    (nextTab, replaceHistory = false) => {
+      if (nextTab === 'managers' && authUser && authUser.role !== 'SUPER_ADMIN') {
+        setToast({
+          message: 'Access Denied (403): Super Admin privileges are required to access /admin/managers.',
+          type: 'error'
+        });
+        setCurrentTabState('dashboard');
+        if (typeof window !== 'undefined') {
+          window.history.replaceState({}, '', '/dashboard');
+        }
+        return;
+      }
+
+      setCurrentTabState(nextTab);
+      if (typeof window !== 'undefined') {
+        const targetPath = resolvePathFromTab(nextTab);
+        if (window.location.pathname !== targetPath) {
+          if (replaceHistory) {
+            window.history.replaceState({}, '', targetPath);
+          } else {
+            window.history.pushState({}, '', targetPath);
+          }
+        }
+      }
+    },
+    [authUser]
+  );
+
   // Set up initial cloud pull, HttpOnly cookie session verification, periodic 4-second live sync, window focus/visibility sync, and BroadcastChannel
   useEffect(() => {
     fetch('/api/auth/session', {
@@ -264,12 +339,56 @@ export default function App() {
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((sessionData) => {
-        if (sessionData?.role) setUserRole(sessionData.role);
         if (sessionData?.cookieType) setSessionCookieType(sessionData.cookieType);
-      })
-      .catch(() => {});
+        if (sessionData?.authenticated && sessionData?.user) {
+          setAuthUser(sessionData.user);
+          setCsrfToken(sessionData.csrfToken || '');
+          csrfTokenRef.current = sessionData.csrfToken || '';
 
-    pullStateFromCloud(true);
+          if (typeof window !== 'undefined') {
+            const path = window.location.pathname.toLowerCase();
+            const params = new URLSearchParams(window.location.search);
+            const callbackUrl = params.get('callbackUrl');
+            if (path.startsWith('/login')) {
+              const target =
+                callbackUrl && callbackUrl.startsWith('/') && !callbackUrl.startsWith('//')
+                  ? callbackUrl
+                  : '/dashboard';
+              window.history.replaceState({}, '', target);
+              setCurrentTabState(resolveTabFromPath(target));
+            } else if (
+              (path.startsWith('/admin') || currentTab === 'managers') &&
+              sessionData.user.role !== 'SUPER_ADMIN'
+            ) {
+              window.history.replaceState({}, '', '/dashboard');
+              setCurrentTabState('dashboard');
+            }
+          }
+          pullStateFromCloud(true);
+        } else {
+          setAuthUser(null);
+          if (typeof window !== 'undefined') {
+            const path = window.location.pathname;
+            if (!path.toLowerCase().startsWith('/login')) {
+              const callbackUrl = encodeURIComponent(path + (window.location.search || ''));
+              window.history.replaceState({}, '', `/login?callbackUrl=${callbackUrl}`);
+            }
+          }
+        }
+      })
+      .catch(() => {
+        setAuthUser(null);
+      })
+      .finally(() => {
+        setAuthChecking(false);
+      });
+
+    const handlePopState = () => {
+      if (typeof window !== 'undefined') {
+        setCurrentTabState(resolveTabFromPath(window.location.pathname));
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
 
     const pollInterval = setInterval(() => {
       pullStateFromCloud(false);
@@ -305,6 +424,7 @@ export default function App() {
     return () => {
       clearInterval(pollInterval);
       clearInterval(tickInterval);
+      window.removeEventListener('popstate', handlePopState);
       window.removeEventListener('focus', handleFocusOrVisible);
       document.removeEventListener('visibilitychange', handleFocusOrVisible);
       if (bc) bc.close();
@@ -394,10 +514,31 @@ export default function App() {
     setToast({ message, type });
   };
 
+  // Scope properties & tenants according to RBAC role & assignedProperties
+  const visibleProperties = useMemo(() => {
+    if (!authUser || authUser.role === 'SUPER_ADMIN') return properties;
+    const assigned = Array.isArray(authUser.assignedProperties) ? authUser.assignedProperties : [];
+    if (assigned.length === 0) return properties;
+    return properties.filter(
+      (p) =>
+        assigned.includes(p.id) ||
+        (assigned.includes('PLH-AM') && p.name?.toLowerCase().includes('amamoley')) ||
+        (assigned.includes('PLH-KW') && p.name?.toLowerCase().includes('kwabenya'))
+    );
+  }, [properties, authUser]);
+
   // Enrich all tenant records dynamically (auto-updates daysToExpiry, rentStatus, expiryAlert, progress for ≤90 days)
   const tenants = useMemo(() => {
-    return rawTenants.map((t) => enrichTenantRecord(t, settings));
-  }, [rawTenants, settings, autoTick]);
+    const allEnriched = rawTenants.map((t) => enrichTenantRecord(t, settings));
+    if (!authUser || authUser.role === 'SUPER_ADMIN') return allEnriched;
+    const assigned = Array.isArray(authUser.assignedProperties) ? authUser.assignedProperties : [];
+    if (assigned.length === 0) return allEnriched;
+    return allEnriched.filter(
+      (t) =>
+        (assigned.includes('PLH-AM') && t.property?.toLowerCase().includes('amamoley')) ||
+        (assigned.includes('PLH-KW') && t.property?.toLowerCase().includes('kwabenya'))
+    );
+  }, [rawTenants, settings, autoTick, authUser]);
 
   // Compute Executive KPI Metrics
   const metrics = useMemo(() => {
@@ -405,8 +546,8 @@ export default function App() {
     const vacant = tenants.filter((t) => t.isVacantSlot || t.rentStatus === 'No Contract');
 
     const occupiedUnits = leased.length;
-    const configuredTotal = properties.reduce((sum, p) => sum + (Number(p.totalUnits) || 8), 0);
-    const totalUnits = Math.max(configuredTotal || 16, occupiedUnits + vacant.length);
+    const configuredTotal = visibleProperties.reduce((sum, p) => sum + (Number(p.totalUnits) || 8), 0);
+    const totalUnits = Math.max(configuredTotal || 8, occupiedUnits + vacant.length);
     const vacantUnits = Math.max(0, totalUnits - occupiedUnits);
     const occupancyRate = totalUnits > 0 ? Math.round((occupiedUnits / totalUnits) * 100) : 0;
 
@@ -434,7 +575,7 @@ export default function App() {
       totalContractValue,
       activeContractValue
     };
-  }, [tenants]);
+  }, [tenants, visibleProperties]);
 
   // Active Slide-Over Drawer & Modals State
   const [selectedTenantId, setSelectedTenantId] = useState(null);
@@ -454,49 +595,58 @@ export default function App() {
     [tenants, selectedTenantId]
   );
 
-  const handleSwitchRole = async (targetRole) => {
+  const handleLoginSuccess = (user, nextCsrfToken, redirectPath = '/dashboard') => {
+    setAuthUser(user);
+    setCsrfToken(nextCsrfToken || '');
+    csrfTokenRef.current = nextCsrfToken || '';
+    pullStateFromCloud(true);
+
+    const safePath =
+      redirectPath && redirectPath.startsWith('/') && !redirectPath.startsWith('//')
+        ? redirectPath
+        : '/dashboard';
+    const targetTab = resolveTabFromPath(safePath);
+    if (targetTab === 'managers' && user.role !== 'SUPER_ADMIN') {
+      setCurrentTab('dashboard', true);
+    } else {
+      setCurrentTab(targetTab, true);
+    }
+    showToast(`Welcome back, ${user.fullName} (${user.role === 'SUPER_ADMIN' ? 'Super Admin' : 'Facility Manager'})`, 'success');
+  };
+
+  const handleLogout = async () => {
     try {
-      const res = await fetch('/api/auth/session', {
+      await fetch('/api/auth/logout', {
         method: 'POST',
         credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: targetRole })
+        headers: {
+          'Content-Type': 'application/json',
+          ...(csrfTokenRef.current ? { 'X-CSRF-Token': csrfTokenRef.current } : {})
+        }
       });
-      const data = await res.json();
-      if (res.ok && data?.role) {
-        setUserRole(data.role);
-        showToast(
-          `HttpOnly Session Role switched to ${
-            data.role === 'property_manager' ? 'Property Manager (Full Access)' : 'Tenant Viewer (Read-Only)'
-          }`,
-          'info'
-        );
-      } else {
-        showToast(data?.error || 'Could not switch session role', 'error');
-      }
-    } catch (e) {
-      showToast('Failed to update server session role', 'error');
+    } catch (e) {}
+    setAuthUser(null);
+    setCsrfToken('');
+    csrfTokenRef.current = '';
+    setSelectedTenantId(null);
+    if (typeof window !== 'undefined') {
+      window.history.replaceState({}, '', '/login');
     }
+    showToast('Signed out securely. Session cookie revoked.', 'info');
+  };
+
+  const handleSwitchRole = async () => {
+    showToast('Role is cryptographically bound to your authenticated account.', 'info');
   };
 
   const handleClearSessionData = async () => {
-    try {
-      await fetch('/api/auth/session', {
-        method: 'DELETE',
-        credentials: 'same-origin'
-      });
-      setUserRole('tenant_viewer');
-      showToast('HttpOnly session cookie & client site storage cleared (Clear-Site-Data)', 'info');
-    } catch (e) {}
+    await handleLogout();
   };
 
   // Helper to commit tenant list updates and sync to Cloud + all browsers/Incognito immediately
   const commitTenantsUpdate = (updaterFn) => {
-    if (userRole !== 'property_manager') {
-      showToast(
-        'Read-Only Mode (Tenant Viewer): Switch to Property Manager role in Settings to modify records.',
-        'error'
-      );
+    if (!authUser || (authUser.role !== 'SUPER_ADMIN' && authUser.role !== 'FACILITY_MANAGER')) {
+      showToast('Authentication required to modify tenant records.', 'error');
       return false;
     }
     setRawTenants((prev) => {
@@ -723,6 +873,38 @@ export default function App() {
     setCurrentTab(targetTab);
   };
 
+  // Guard unauthenticated visits and initial session check
+  if (authChecking) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-950 text-slate-200">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-10 h-10 rounded-xl border-2 border-amber-500/30 border-t-amber-400 animate-spin" />
+          <p className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+            Verifying Encrypted Session...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!authUser || authUser.requirePasswordReset) {
+    const callbackUrl =
+      typeof window !== 'undefined'
+        ? new URLSearchParams(window.location.search).get('callbackUrl') || '/dashboard'
+        : '/dashboard';
+    return (
+      <>
+        <LoginPage
+          onLoginSuccess={handleLoginSuccess}
+          callbackUrl={callbackUrl}
+          themeMode={renderedTheme}
+          onToggleTheme={handleQuickToggleTheme}
+        />
+        <Toast toast={toast} onClose={() => setToast(null)} />
+      </>
+    );
+  }
+
   return (
     <div className="min-h-screen flex bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors">
       {/* 1. Collapsible Luxury Sidebar */}
@@ -738,6 +920,8 @@ export default function App() {
         onToggleTheme={handleQuickToggleTheme}
         settings={settings}
         onResetDemo={handleResetDemo}
+        currentUser={authUser}
+        onLogout={handleLogout}
       />
 
       {/* 2. Main Viewport */}
@@ -765,13 +949,15 @@ export default function App() {
             pullStateFromCloud(false);
             showToast('Synced latest records from cloud', 'info');
           }}
+          currentUser={authUser}
+          onLogout={handleLogout}
         />
 
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-[1600px] w-full mx-auto">
           {currentTab === 'dashboard' && (
             <Dashboard
               tenants={tenants}
-              properties={properties}
+              properties={visibleProperties}
               metrics={metrics}
               settings={settings}
               onNavigate={setCurrentTab}
@@ -787,7 +973,7 @@ export default function App() {
           {currentTab === 'properties' && (
             <PropertiesView
               tenants={tenants}
-              properties={properties}
+              properties={visibleProperties}
               settings={settings}
               onSelectTenant={(t) => setSelectedTenantId(t.id)}
               onEditTenant={(t) => {
@@ -808,7 +994,7 @@ export default function App() {
           {currentTab === 'tenants' && (
             <TenantsView
               tenants={tenants}
-              properties={properties}
+              properties={visibleProperties}
               settings={settings}
               initialFilters={directoryInitialFilters}
               onClearInitialFilters={() => setDirectoryInitialFilters(null)}
@@ -855,7 +1041,7 @@ export default function App() {
           {currentTab === 'finances' && (
             <FinancesView
               tenants={tenants}
-              properties={properties}
+              properties={visibleProperties}
               metrics={metrics}
               settings={settings}
               onSelectTenant={(t) => setSelectedTenantId(t.id)}
@@ -867,13 +1053,21 @@ export default function App() {
             />
           )}
 
+          {currentTab === 'managers' && authUser?.role === 'SUPER_ADMIN' && (
+            <ManagersAdminView
+              currentUser={authUser}
+              csrfToken={csrfToken}
+              onShowToast={showToast}
+            />
+          )}
+
           {currentTab === 'settings' && (
             <SettingsView
               settings={settings}
               onUpdateSettings={(next) => {
-                if (userRole !== 'property_manager') {
+                if (authUser?.role !== 'SUPER_ADMIN') {
                   showToast(
-                    'Read-Only Mode (Tenant Viewer): Switch to Property Manager role to modify settings.',
+                    'Restricted Action: Only SUPER_ADMIN can modify global system settings.',
                     'error'
                   );
                   return;
@@ -887,7 +1081,7 @@ export default function App() {
               onExportCSV={() => handleExportCSV(tenants)}
               onImportCSVText={handleImportCSVText}
               onResetDemo={handleResetDemo}
-              userRole={userRole}
+              userRole={authUser?.role === 'SUPER_ADMIN' ? 'property_manager' : 'FACILITY_MANAGER'}
               sessionCookieType={sessionCookieType}
               onSwitchRole={handleSwitchRole}
               onClearSessionData={handleClearSessionData}
@@ -900,7 +1094,7 @@ export default function App() {
       {selectedTenant && (
         <TenantDrawer
           tenant={selectedTenant}
-          properties={properties}
+          properties={visibleProperties}
           settings={settings}
           onClose={() => setSelectedTenantId(null)}
           onSaveInline={handleSaveInlineDrawer}
@@ -925,7 +1119,7 @@ export default function App() {
         onClose={() => setTenantModalOpen(false)}
         editingTenant={editingTenant}
         tenants={tenants}
-        properties={properties}
+        properties={visibleProperties}
         settings={settings}
         onSave={handleSaveTenantModal}
       />
@@ -952,7 +1146,7 @@ export default function App() {
         isOpen={statementModalOpen}
         onClose={() => setStatementModalOpen(false)}
         tenant={statementTenant}
-        properties={properties}
+        properties={visibleProperties}
         settings={settings}
       />
 

@@ -1,8 +1,21 @@
+const path = require('path');
+const fs = require('fs');
+const dotenv = require('dotenv');
+
+const rootDir = path.join(__dirname, '..');
+if (fs.existsSync(path.join(rootDir, '.env.local'))) {
+  dotenv.config({ path: path.join(rootDir, '.env.local') });
+}
+if (fs.existsSync(path.join(rootDir, '.env'))) {
+  dotenv.config({ path: path.join(rootDir, '.env') });
+}
+
 const db = require('./database');
 const { v4: uuidv4 } = require('uuid');
+const { buildDefaultSeededManagers } = require('./auth');
 
 function seedDatabase() {
-  console.log('Seeding sheet data into database...');
+  console.log('Seeding sheet data and administrative accounts into database...');
 
   // Clear existing records
   db.exec(`
@@ -13,6 +26,7 @@ function seedDatabase() {
     DELETE FROM units;
     DELETE FROM tenants;
     DELETE FROM properties;
+    DELETE FROM managers;
   `);
 
   const insertProperty = db.prepare(`
@@ -378,10 +392,38 @@ function seedDatabase() {
       );
     });
 
+    // 7. SEED ADMINISTRATIVE & FACILITY MANAGER ACCOUNTS (BCRYPT COST 12)
+    const insertManager = db.prepare(`
+      INSERT INTO managers (
+        id, full_name, email, username, password_hash, role,
+        assigned_properties, status, require_password_reset,
+        failed_login_attempts, locked_until, last_login_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const defaultManagers = buildDefaultSeededManagers();
+    defaultManagers.forEach(mgr => {
+      insertManager.run(
+        mgr.id,
+        mgr.fullName,
+        mgr.email,
+        mgr.username,
+        mgr.passwordHash,
+        mgr.role,
+        JSON.stringify(mgr.assignedProperties),
+        mgr.status,
+        mgr.requirePasswordReset ? 1 : 0,
+        0,
+        0,
+        null,
+        mgr.createdAt
+      );
+    });
+
   });
 
   transaction();
-  console.log('Database successfully seeded with sheet data: 16 tenants across PLH-AM and PLH-KW.');
+  console.log('Database successfully seeded: 16 tenants (PLH-AM & PLH-KW), Super Admin account, and Facility Manager Douglas Amadie.');
 }
 
 if (require.main === module) {

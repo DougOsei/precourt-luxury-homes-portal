@@ -132,6 +132,22 @@ function initSchema() {
       FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE SET NULL,
       FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE SET NULL
     );
+
+    CREATE TABLE IF NOT EXISTS managers (
+      id TEXT PRIMARY KEY,
+      full_name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'FACILITY_MANAGER', -- SUPER_ADMIN, FACILITY_MANAGER
+      assigned_properties TEXT NOT NULL DEFAULT '["PLH-AM","PLH-KW"]',
+      status TEXT NOT NULL DEFAULT 'Active', -- Active, Inactive
+      require_password_reset INTEGER NOT NULL DEFAULT 0,
+      failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+      locked_until INTEGER DEFAULT 0,
+      last_login_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // Safe migrations for existing tables

@@ -60,6 +60,12 @@ export default function Header({
           title: 'Financials & Contract Revenue',
           subtitle: 'Monthly and cumulative contract valuations in Ghanaian Cedis (GH₵) with official statements'
         };
+      case 'managers':
+        return {
+          badge: 'SUPER ADMIN • /admin/managers',
+          title: 'Manager Provisioning & Role Access Control',
+          subtitle: 'Manage Facility Managers (Douglas Amadie), assign properties (PLH-AM / PLH-KW), and rotate credentials'
+        };
       case 'settings':
         return {
           badge: 'PORTAL PREFERENCES',

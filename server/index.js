@@ -10,13 +10,18 @@ const {
   applySecurityHeaders,
   enforceFetchMetadataIsolation,
   checkRateLimit,
-  resolveSession,
-  requireRole,
-  handleSessionEndpoint,
   safeErrorResponse,
   formatZodError,
   schemas
 } = require('./security');
+const {
+  getAuthenticatedSession,
+  requireAuth,
+  handleAuthLoginEndpoint,
+  handleAuthLogoutEndpoint,
+  handleAuthSessionCheckEndpoint,
+  handleAdminManagersEndpoint
+} = require('./auth');
 
 const app = express();
 const PORT = process.env.PORT || 5050;
@@ -44,7 +49,26 @@ app.use(
 // Enforce 512 KB max JSON body payload to mitigate DoS (Phase 5)
 app.use(express.json({ limit: '512kb' }));
 
-// Fetch Metadata resource isolation & sliding-window rate limiting on all /api routes
+// -------------------------------------------------------------
+// PHASE 3: AUTHENTICATION & SUPER ADMIN MANAGER PROVISIONING ENDPOINTS
+// -------------------------------------------------------------
+app.all('/api/auth/login', async (req, res) => {
+  await handleAuthLoginEndpoint(req, res);
+});
+
+app.all('/api/auth/logout', async (req, res) => {
+  await handleAuthLogoutEndpoint(req, res);
+});
+
+app.all('/api/auth/session', async (req, res) => {
+  await handleAuthSessionCheckEndpoint(req, res);
+});
+
+app.all('/api/admin/managers', async (req, res) => {
+  await handleAdminManagersEndpoint(req, res);
+});
+
+// Fetch Metadata resource isolation, sliding-window rate limiting & RBAC on remaining /api routes
 app.use('/api', (req, res, next) => {
   if (!enforceFetchMetadataIsolation(req, res)) return;
 
@@ -56,13 +80,12 @@ app.use('/api', (req, res, next) => {
   });
   if (!allowed) return;
 
-  // Enforce server-side RBAC on all state-mutating API endpoints (except /api/auth/session)
-  if (isMutation && !req.path.startsWith('/auth/session')) {
-    const session = requireRole(req, res, ['property_manager']);
+  if (isMutation) {
+    const session = requireAuth(req, res, ['SUPER_ADMIN', 'FACILITY_MANAGER']);
     if (!session) return;
     req.userSession = session;
   } else {
-    req.userSession = resolveSession(req, res, { autoIssue: true });
+    req.userSession = getAuthenticatedSession(req);
   }
 
   next();
@@ -94,13 +117,6 @@ function validateIdParam(req, res, next) {
   req.params.id = parsed.data.id;
   next();
 }
-
-// -------------------------------------------------------------
-// PHASE 3: AUTHENTICATION & RBAC SESSION ENDPOINT
-// -------------------------------------------------------------
-app.all('/api/auth/session', async (req, res) => {
-  await handleSessionEndpoint(req, res);
-});
 
 // -------------------------------------------------------------
 // REAL-TIME CROSS-BROWSER & CLOUD PORTAL STATE SYNC
@@ -1823,12 +1839,39 @@ app.post('/api/seed/reset', (req, res) => {
   }
 });
 
-// In production, serve Vite client build
+// In production, serve Vite client build with Route Protection Middleware
 const clientDistPath = path.join(__dirname, '..', 'dist');
 app.use(express.static(clientDistPath));
 
 app.use((req, res, next) => {
   if (req.method === 'GET' && !req.url.startsWith('/api')) {
+    const urlPath = req.path || '/';
+    const session = getAuthenticatedSession(req);
+
+    // 1. Redirect authenticated users away from /login directly to their dashboard
+    if (urlPath === '/login' && session) {
+      return res.redirect(302, '/dashboard');
+    }
+
+    // 2. Guard protected routes (/dashboard, /properties, /tenants, /leases, /finances, /settings, /admin/*)
+    const isProtectedRoute =
+      urlPath.startsWith('/dashboard') ||
+      urlPath.startsWith('/properties') ||
+      urlPath.startsWith('/tenants') ||
+      urlPath.startsWith('/leases') ||
+      urlPath.startsWith('/finances') ||
+      urlPath.startsWith('/settings') ||
+      urlPath.startsWith('/admin');
+
+    if (isProtectedRoute && !session) {
+      return res.redirect(302, `/login?callbackUrl=${encodeURIComponent(req.originalUrl || urlPath)}`);
+    }
+
+    // 3. Prevent FACILITY_MANAGER users from accessing /admin/* management routes
+    if (urlPath.startsWith('/admin') && session && session.role !== 'SUPER_ADMIN') {
+      return res.redirect(302, '/dashboard');
+    }
+
     return res.sendFile(path.join(clientDistPath, 'index.html'), (err) => {
       if (err) next();
     });

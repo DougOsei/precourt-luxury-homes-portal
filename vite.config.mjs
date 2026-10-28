@@ -11,14 +11,19 @@ const {
   applySecurityHeaders,
   enforceFetchMetadataIsolation,
   checkRateLimit,
-  resolveSession,
-  requireRole,
   readBoundedJsonBody,
-  handleSessionEndpoint,
   formatZodError,
   scrubSensitiveLog,
   schemas
 } = require('./server/security');
+const {
+  getAuthenticatedSession,
+  requireAuth,
+  handleAuthLoginEndpoint,
+  handleAuthLogoutEndpoint,
+  handleAuthSessionCheckEndpoint,
+  handleAdminManagersEndpoint
+} = require('./server/auth');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOCAL_STATE_FILE = path.join(__dirname, 'server', 'portal_state.json');
@@ -32,15 +37,70 @@ function plhPortalStateSyncPlugin() {
       const gistId = env.PLH_GIST_ID || process.env.PLH_GIST_ID;
       const githubToken = env.PLH_GITHUB_TOKEN || process.env.PLH_GITHUB_TOKEN;
 
-      // Apply HTTP security headers across dev server responses
+      // Apply HTTP security headers and route protection across dev server responses
       server.middlewares.use((req, res, next) => {
         applySecurityHeaders(req, res);
+
+        // Route Protection Middleware for top-level HTML navigation
+        const accept = req.headers?.accept || '';
+        const urlObj = new URL(req.url || '/', 'http://localhost');
+        const urlPath = urlObj.pathname;
+
+        if (req.method === 'GET' && accept.includes('text/html') && !urlPath.startsWith('/api')) {
+          const session = getAuthenticatedSession(req);
+
+          if (urlPath === '/login' && session) {
+            res.statusCode = 302;
+            res.setHeader('Location', '/dashboard');
+            res.end();
+            return;
+          }
+
+          const isProtectedRoute =
+            urlPath.startsWith('/dashboard') ||
+            urlPath.startsWith('/properties') ||
+            urlPath.startsWith('/tenants') ||
+            urlPath.startsWith('/leases') ||
+            urlPath.startsWith('/finances') ||
+            urlPath.startsWith('/settings') ||
+            urlPath.startsWith('/admin');
+
+          if (isProtectedRoute && !session) {
+            res.statusCode = 302;
+            res.setHeader(
+              'Location',
+              `/login?callbackUrl=${encodeURIComponent(urlPath + urlObj.search)}`
+            );
+            res.end();
+            return;
+          }
+
+          if (urlPath.startsWith('/admin') && session && session.role !== 'SUPER_ADMIN') {
+            res.statusCode = 302;
+            res.setHeader('Location', '/dashboard');
+            res.end();
+            return;
+          }
+        }
+
         next();
       });
 
-      // Handle /api/auth/session directly in Vite dev server
+      // Handle /api/auth/* and /api/admin/managers directly in Vite dev server
+      server.middlewares.use('/api/auth/login', async (req, res) => {
+        await handleAuthLoginEndpoint(req, res);
+      });
+
+      server.middlewares.use('/api/auth/logout', async (req, res) => {
+        await handleAuthLogoutEndpoint(req, res);
+      });
+
       server.middlewares.use('/api/auth/session', async (req, res) => {
-        await handleSessionEndpoint(req, res);
+        await handleAuthSessionCheckEndpoint(req, res);
+      });
+
+      server.middlewares.use('/api/admin/managers', async (req, res) => {
+        await handleAdminManagersEndpoint(req, res);
       });
 
       server.middlewares.use('/api/portal-state', async (req, res, next) => {
@@ -63,9 +123,8 @@ function plhPortalStateSyncPlugin() {
 
         try {
           if (req.method === 'GET') {
-            const session = resolveSession(req, res, { autoIssue: true });
+            const session = getAuthenticatedSession(req);
 
-            // Try cloud Gist first if configured, falling back to local server/portal_state.json
             let cloudState = null;
             if (gistId) {
               try {
@@ -83,9 +142,7 @@ function plhPortalStateSyncPlugin() {
                   const content = gData.files?.[GIST_FILENAME]?.content;
                   if (content) cloudState = JSON.parse(content);
                 }
-              } catch (e) {
-                // Fallback to local file below
-              }
+              } catch (e) {}
             }
 
             let localState = null;
@@ -95,7 +152,6 @@ function plhPortalStateSyncPlugin() {
               } catch (e) {}
             }
 
-            // Pick whichever has the newer updatedAt timestamp
             let resolvedState = cloudState || localState;
             if (cloudState && localState) {
               resolvedState =
@@ -108,20 +164,23 @@ function plhPortalStateSyncPlugin() {
               fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(resolvedState, null, 2), 'utf8');
             }
 
+            const safeState = resolvedState ? { ...resolvedState } : null;
+            if (safeState) delete safeState.managers;
+
             res.statusCode = 200;
             res.end(
               JSON.stringify({
                 ok: true,
                 source: cloudState ? 'cloud+local' : 'local-disk',
-                role: session.role,
-                state: resolvedState
+                role: session?.role || null,
+                state: safeState
               })
             );
             return;
           }
 
           if (isWrite) {
-            const session = requireRole(req, res, ['property_manager']);
+            const session = requireAuth(req, res, ['SUPER_ADMIN', 'FACILITY_MANAGER']);
             if (!session) return;
 
             const rawBody = await readBoundedJsonBody(req, res);
@@ -140,18 +199,25 @@ function plhPortalStateSyncPlugin() {
             }
 
             const valid = parsed.data;
+            let existingManagers = undefined;
+            if (fs.existsSync(LOCAL_STATE_FILE)) {
+              try {
+                const prev = JSON.parse(fs.readFileSync(LOCAL_STATE_FILE, 'utf8'));
+                if (Array.isArray(prev.managers)) existingManagers = prev.managers;
+              } catch (e) {}
+            }
+
             const nextState = {
               tenants: valid.tenants,
               properties: valid.properties,
               settings: valid.settings,
+              managers: existingManagers,
               updatedAt: Number(valid.updatedAt) || Date.now()
             };
 
-            // Always persist to shared local disk file immediately
             fs.mkdirSync(path.dirname(LOCAL_STATE_FILE), { recursive: true });
             fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(nextState, null, 2), 'utf8');
 
-            // Also persist to Cloud Gist if configured
             let syncedCloud = false;
             if (gistId && githubToken) {
               try {
@@ -175,6 +241,9 @@ function plhPortalStateSyncPlugin() {
               } catch (e) {}
             }
 
+            const safeState = { ...nextState };
+            delete safeState.managers;
+
             res.statusCode = 200;
             res.end(
               JSON.stringify({
@@ -182,7 +251,7 @@ function plhPortalStateSyncPlugin() {
                 source: syncedCloud ? 'cloud+local' : 'local-disk',
                 role: session.role,
                 updatedAt: nextState.updatedAt,
-                state: nextState
+                state: safeState
               })
             );
             return;

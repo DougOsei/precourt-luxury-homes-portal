@@ -2,13 +2,12 @@ const {
   applySecurityHeaders,
   enforceFetchMetadataIsolation,
   checkRateLimit,
-  resolveSession,
-  requireRole,
   readBoundedJsonBody,
   formatZodError,
   scrubSensitiveLog,
   schemas
 } = require('../server/security');
+const { getAuthenticatedSession, requireAuth } = require('../server/auth');
 
 const GIST_FILENAME = 'plh_portal_state.json';
 
@@ -52,11 +51,24 @@ async function saveToGist(gistId, token, statePayload) {
     'User-Agent': 'Precourt-Luxury-Homes-Portal'
   };
 
+  let existingManagers = undefined;
+  try {
+    const existing = await fetchFromGist(gistId, token);
+    if (existing && Array.isArray(existing.managers)) {
+      existingManagers = existing.managers;
+    }
+  } catch (e) {}
+
+  const mergedPayload = {
+    ...statePayload,
+    managers: statePayload.managers || existingManagers
+  };
+
   const body = {
     description: `Precourt Luxury Homes — Portal State (Synced ${new Date().toISOString()})`,
     files: {
       [GIST_FILENAME]: {
-        content: JSON.stringify(statePayload, null, 2)
+        content: JSON.stringify(mergedPayload, null, 2)
       }
     }
   };
@@ -71,7 +83,7 @@ async function saveToGist(gistId, token, statePayload) {
     throw new Error(`GitHub Gist PATCH failed with status ${res.status}`);
   }
 
-  return statePayload;
+  return mergedPayload;
 }
 
 module.exports = async function handler(req, res) {
@@ -84,7 +96,6 @@ module.exports = async function handler(req, res) {
     return res.status(200).end();
   }
 
-  // Enforce Fetch Metadata resource isolation (blocks cross-site CSRF / XSSI)
   if (!enforceFetchMetadataIsolation(req, res)) {
     return;
   }
@@ -105,32 +116,36 @@ module.exports = async function handler(req, res) {
 
   try {
     if (req.method === 'GET') {
-      const session = resolveSession(req, res, { autoIssue: true });
+      const session = getAuthenticatedSession(req);
 
       if (gistId) {
         const cloudState = await fetchFromGist(gistId, githubToken);
         if (cloudState) {
           memoryCache = cloudState;
+          const safeState = { ...cloudState };
+          delete safeState.managers;
           return res.status(200).json({
             ok: true,
             source: 'cloud-gist',
-            role: session.role,
-            state: cloudState
+            role: session?.role || null,
+            state: safeState
           });
         }
       }
 
+      const safeMem = memoryCache ? { ...memoryCache } : null;
+      if (safeMem) delete safeMem.managers;
       return res.status(200).json({
         ok: true,
-        source: memoryCache ? 'memory' : 'empty',
-        role: session.role,
-        state: memoryCache
+        source: safeMem ? 'memory' : 'empty',
+        role: session?.role || null,
+        state: safeMem
       });
     }
 
     if (isWrite) {
-      // Enforce server-side RBAC from HttpOnly signed cookie
-      const session = requireRole(req, res, ['property_manager']);
+      // Require authenticated SUPER_ADMIN or FACILITY_MANAGER session
+      const session = requireAuth(req, res, ['SUPER_ADMIN', 'FACILITY_MANAGER']);
       if (!session) return;
 
       const rawBody = await readBoundedJsonBody(req, res);
@@ -152,7 +167,10 @@ module.exports = async function handler(req, res) {
         updatedAt: Number(valid.updatedAt) || Date.now()
       };
 
-      memoryCache = nextState;
+      memoryCache = {
+        ...(memoryCache || {}),
+        ...nextState
+      };
 
       if (gistId && githubToken) {
         await saveToGist(gistId, githubToken, nextState);

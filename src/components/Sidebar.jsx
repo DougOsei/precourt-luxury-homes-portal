@@ -13,8 +13,11 @@ import {
   Crown,
   ShieldCheck,
   Sparkles,
-  RotateCcw
+  RotateCcw,
+  UserCog,
+  LogOut
 } from 'lucide-react';
+import { getInitials } from '../utils';
 
 export default function Sidebar({
   currentTab,
@@ -27,9 +30,13 @@ export default function Sidebar({
   themeMode,
   onToggleTheme,
   settings,
-  onResetDemo
+  onResetDemo,
+  currentUser,
+  onLogout
 }) {
-  const navItems = [
+  const isSuperAdmin = currentUser?.role === 'SUPER_ADMIN';
+
+  const baseNavItems = [
     {
       id: 'dashboard',
       label: 'Dashboard',
@@ -74,15 +81,30 @@ export default function Sidebar({
       icon: Wallet,
       badge: 'GHS',
       badgeClass: 'bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono'
-    },
-    {
-      id: 'settings',
-      label: 'Settings / Preferences',
-      subtitle: 'Currency & alert thresholds',
-      icon: Settings,
-      badge: null
     }
   ];
+
+  const adminNavItems = isSuperAdmin
+    ? [
+        {
+          id: 'managers',
+          label: 'Manager Provisioning',
+          subtitle: 'Super Admin (/admin/managers)',
+          icon: UserCog,
+          badge: 'ADMIN',
+          badgeClass: 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+        },
+        {
+          id: 'settings',
+          label: 'Settings / Preferences',
+          subtitle: 'Currency & alert thresholds',
+          icon: Settings,
+          badge: null
+        }
+      ]
+    : [];
+
+  const navItems = [...baseNavItems, ...adminNavItems];
 
   const isDarkRendered = themeMode === 'dark';
 
@@ -257,21 +279,31 @@ export default function Sidebar({
             )}
           </div>
 
-          {/* Admin Profile Summary */}
-          <div className={`flex items-center gap-3 p-2 rounded-xl bg-slate-900/70 border border-slate-800/80 ${collapsed && !mobileOpen ? 'justify-center' : ''}`}>
+          {/* Authenticated Manager Profile Summary & Sign Out */}
+          <div className={`flex items-center gap-2.5 p-2 rounded-xl bg-slate-900/70 border border-slate-800/80 ${collapsed && !mobileOpen ? 'justify-center' : ''}`}>
             <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-amber-500 to-emerald-600 text-slate-950 font-black text-xs flex items-center justify-center shrink-0 shadow-sm">
-              KM
+              {getInitials(currentUser?.fullName || settings?.adminName || 'Douglas Amadie')}
             </div>
             {(!collapsed || mobileOpen) && (
               <div className="min-w-0 flex-1">
                 <div className="text-xs font-bold text-white truncate">
-                  {settings?.adminName || 'Kwame Mensah'}
+                  {currentUser?.fullName || settings?.adminName || 'Douglas Amadie'}
                 </div>
                 <div className="text-[10px] text-slate-400 truncate flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
-                  {settings?.adminRole || 'Executive Facility Director'}
+                  {currentUser?.role || 'FACILITY_MANAGER'}
                 </div>
               </div>
+            )}
+            {onLogout && (!collapsed || mobileOpen) && (
+              <button
+                type="button"
+                onClick={onLogout}
+                title="Sign Out of Portal"
+                className="p-2 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition cursor-pointer shrink-0"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
             )}
           </div>
         </div>
