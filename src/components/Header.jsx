@@ -8,7 +8,9 @@ import {
   Calendar,
   Building2,
   Sun,
-  Moon
+  Moon,
+  CloudCheck,
+  RefreshCw
 } from 'lucide-react';
 import { formatDateCSV } from '../utils';
 
@@ -22,7 +24,9 @@ export default function Header({
   onNavigate,
   themeMode,
   onToggleTheme,
-  settings
+  settings,
+  syncStatus = 'synced',
+  onForceSync
 }) {
   const getHeaderMeta = () => {
     switch (currentTab) {
@@ -36,7 +40,7 @@ export default function Header({
         return {
           badge: 'ASSET PORTFOLIO',
           title: 'Properties & Units Directory',
-          subtitle: 'Manage PLH-AM (Amasaman) & PLH-KW (Kwabenya) luxury residential units and occupancy'
+          subtitle: 'Manage PLH-AM (Amamoley) & PLH-KW (Kwabenya) luxury residential units and occupancy'
         };
       case 'tenants':
         return {
@@ -98,6 +102,19 @@ export default function Header({
                 <Calendar className="w-3 h-3 text-amber-500" />
                 Ref: {refDateDisplay}
               </span>
+              <button
+                type="button"
+                onClick={onForceSync}
+                title="Live Cloud Sync across all browsers & Incognito windows — Click to sync now"
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border transition cursor-pointer ${
+                  syncStatus === 'syncing'
+                    ? 'bg-amber-500/10 text-amber-600 dark:text-amber-300 border-amber-500/25'
+                    : 'bg-teal-500/10 text-teal-700 dark:text-teal-300 border-teal-500/25 hover:bg-teal-500/20'
+                }`}
+              >
+                <RefreshCw className={`w-2.5 h-2.5 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
+                <span>{syncStatus === 'syncing' ? 'Syncing Cloud...' : 'Cloud Synced'}</span>
+              </button>
             </div>
             <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white tracking-tight truncate mt-0.5">
               {title}

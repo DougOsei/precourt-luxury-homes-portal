@@ -1,15 +1,131 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const db = require('./database');
 const { seedDatabase } = require('./seed');
 
 const app = express();
 const PORT = process.env.PORT || 5050;
+const LOCAL_STATE_FILE = path.join(__dirname, 'portal_state.json');
+const GIST_FILENAME = 'plh_portal_state.json';
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
+
+// -------------------------------------------------------------
+// REAL-TIME CROSS-BROWSER & CLOUD PORTAL STATE SYNC
+// -------------------------------------------------------------
+app.get('/api/portal-state', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  const gistId = process.env.PLH_GIST_ID;
+  const githubToken = process.env.PLH_GITHUB_TOKEN;
+
+  try {
+    let cloudState = null;
+    if (gistId) {
+      try {
+        const headers = {
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'Precourt-Luxury-Homes-Portal'
+        };
+        if (githubToken) headers.Authorization = `Bearer ${githubToken}`;
+        const gRes = await fetch(`https://api.github.com/gists/${gistId}`, {
+          headers,
+          cache: 'no-store'
+        });
+        if (gRes.ok) {
+          const gData = await gRes.json();
+          const content = gData.files?.[GIST_FILENAME]?.content;
+          if (content) cloudState = JSON.parse(content);
+        }
+      } catch (e) {}
+    }
+
+    let localState = null;
+    if (fs.existsSync(LOCAL_STATE_FILE)) {
+      try {
+        localState = JSON.parse(fs.readFileSync(LOCAL_STATE_FILE, 'utf8'));
+      } catch (e) {}
+    }
+
+    let resolvedState = cloudState || localState;
+    if (cloudState && localState) {
+      resolvedState =
+        (Number(localState.updatedAt) || 0) > (Number(cloudState.updatedAt) || 0)
+          ? localState
+          : cloudState;
+    }
+
+    if (resolvedState) {
+      fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(resolvedState, null, 2), 'utf8');
+    }
+
+    res.json({
+      ok: true,
+      source: cloudState ? 'cloud+local' : 'local-disk',
+      state: resolvedState
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.put('/api/portal-state', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  const gistId = process.env.PLH_GIST_ID;
+  const githubToken = process.env.PLH_GITHUB_TOKEN;
+
+  try {
+    const body = req.body || {};
+    if (!Array.isArray(body.tenants)) {
+      return res.status(400).json({ ok: false, error: 'tenants array required' });
+    }
+
+    const nextState = {
+      tenants: body.tenants,
+      properties: body.properties,
+      settings: body.settings,
+      updatedAt: Number(body.updatedAt) || Date.now()
+    };
+
+    fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(nextState, null, 2), 'utf8');
+
+    let syncedCloud = false;
+    if (gistId && githubToken) {
+      try {
+        const gRes = await fetch(`https://api.github.com/gists/${gistId}`, {
+          method: 'PATCH',
+          headers: {
+            Accept: 'application/vnd.github+json',
+            Authorization: `Bearer ${githubToken}`,
+            'Content-Type': 'application/json',
+            'User-Agent': 'Precourt-Luxury-Homes-Portal'
+          },
+          body: JSON.stringify({
+            files: {
+              [GIST_FILENAME]: {
+                content: JSON.stringify(nextState, null, 2)
+              }
+            }
+          })
+        });
+        syncedCloud = gRes.ok;
+      } catch (e) {}
+    }
+
+    res.json({
+      ok: true,
+      source: syncedCloud ? 'cloud+local' : 'local-disk',
+      updatedAt: nextState.updatedAt,
+      state: nextState
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 // Helper function to format current date
 function getTodayString() {

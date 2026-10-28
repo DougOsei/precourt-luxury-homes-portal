@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import Dashboard from './components/Dashboard';
@@ -29,6 +29,27 @@ import {
 const STORAGE_KEY_TENANTS = 'plh_portal_tenants_v3';
 const STORAGE_KEY_PROPERTIES = 'plh_portal_properties_v3';
 const STORAGE_KEY_SETTINGS = 'plh_portal_settings_v3';
+const STORAGE_KEY_UPDATED_AT = 'plh_portal_updated_at_v3';
+
+// Helper to recover any unsynced edits from v3, v2, or v1 localStorage keys
+function loadInitialTenantsFromLocalStorage() {
+  const keysToTry = [STORAGE_KEY_TENANTS, 'plh_portal_tenants_v2', 'plh_portal_tenants_v1'];
+  for (const key of keysToTry) {
+    try {
+      const saved = localStorage.getItem(key);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          // Filter out legacy placeholder vacant slots if 16 real tenants exist
+          const realTenants = parsed.filter((t) => !t.isVacantSlot && !String(t.id || '').startsWith('VAC-'));
+          const baseList = realTenants.length >= 16 ? realTenants : parsed;
+          return baseList.map((t) => enrichTenantRecord(t, DEFAULT_SETTINGS));
+        }
+      }
+    } catch (e) {}
+  }
+  return INITIAL_TENANTS.map((t) => enrichTenantRecord(t, DEFAULT_SETTINGS));
+}
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState('dashboard');
@@ -36,25 +57,13 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const [autoTick, setAutoTick] = useState(0);
+  const [syncStatus, setSyncStatus] = useState('synced'); // 'synced' | 'syncing'
 
   // Directory cross-navigation filter state
   const [directoryInitialFilters, setDirectoryInitialFilters] = useState(null);
 
   // Load persisted state from LocalStorage or fall back to initial CSV data
-  const [rawTenants, setRawTenants] = useState(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY_TENANTS);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed.map((t) => enrichTenantRecord(t, DEFAULT_SETTINGS));
-        }
-      }
-    } catch (e) {
-      console.error('Failed to read tenants from localStorage:', e);
-    }
-    return INITIAL_TENANTS.map((t) => enrichTenantRecord(t, DEFAULT_SETTINGS));
-  });
+  const [rawTenants, setRawTenants] = useState(() => loadInitialTenantsFromLocalStorage());
 
   const [properties, setProperties] = useState(() => {
     try {
@@ -82,32 +91,203 @@ export default function App() {
     return DEFAULT_SETTINGS;
   });
 
-  // Auto-update ticker: re-evaluates contract countdowns and expiry alerts periodically
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setAutoTick((t) => t + 1);
-    }, 60000);
-    return () => clearInterval(interval);
-  }, []);
+  // Track latest state in refs for cloud sync & polling
+  const rawTenantsRef = useRef(rawTenants);
+  const propertiesRef = useRef(properties);
+  const settingsRef = useRef(settings);
+  const isSavingRef = useRef(false);
+  const lastKnownUpdatedAtRef = useRef(
+    (() => {
+      try {
+        return Number(localStorage.getItem(STORAGE_KEY_UPDATED_AT)) || 0;
+      } catch (e) {
+        return 0;
+      }
+    })()
+  );
 
-  // Persist to LocalStorage
   useEffect(() => {
+    rawTenantsRef.current = rawTenants;
     try {
       localStorage.setItem(STORAGE_KEY_TENANTS, JSON.stringify(rawTenants));
     } catch (e) {}
   }, [rawTenants]);
 
   useEffect(() => {
+    propertiesRef.current = properties;
     try {
       localStorage.setItem(STORAGE_KEY_PROPERTIES, JSON.stringify(properties));
     } catch (e) {}
   }, [properties]);
 
   useEffect(() => {
+    settingsRef.current = settings;
     try {
       localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings));
     } catch (e) {}
   }, [settings]);
+
+  // Push any portal state update to /api/portal-state (Cloud + Local Server + BroadcastChannel)
+  const pushStateToCloud = useCallback(async (nextTenants, nextProps, nextSettings) => {
+    const updatedAt = Date.now();
+    lastKnownUpdatedAtRef.current = updatedAt;
+    isSavingRef.current = true;
+    setSyncStatus('syncing');
+
+    try {
+      localStorage.setItem(STORAGE_KEY_UPDATED_AT, String(updatedAt));
+    } catch (e) {}
+
+    // Broadcast immediately to other open tabs in the same browser
+    try {
+      const bc = new BroadcastChannel('plh_portal_live_sync');
+      bc.postMessage({
+        tenants: nextTenants,
+        properties: nextProps,
+        settings: nextSettings,
+        updatedAt
+      });
+      bc.close();
+    } catch (e) {}
+
+    try {
+      const res = await fetch('/api/portal-state', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tenants: nextTenants,
+          properties: nextProps,
+          settings: nextSettings,
+          updatedAt
+        })
+      });
+      if (res.ok) {
+        setSyncStatus('synced');
+      } else {
+        setSyncStatus('synced');
+      }
+    } catch (err) {
+      console.error('Failed to push portal state to cloud:', err);
+      setSyncStatus('synced');
+    } finally {
+      isSavingRef.current = false;
+    }
+  }, []);
+
+  // Pull latest portal state from /api/portal-state (syncs across Chrome, Edge, Safari, Mobile & Incognito)
+  const pullStateFromCloud = useCallback(
+    async (isInitialBoot = false) => {
+      if (isSavingRef.current) return;
+      try {
+        const res = await fetch(`/api/portal-state?t=${Date.now()}`, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache' }
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const serverState = data?.state;
+
+        if (!serverState || !Array.isArray(serverState.tenants)) {
+          // Server has no state yet: upload current browser state
+          await pushStateToCloud(rawTenantsRef.current, propertiesRef.current, settingsRef.current);
+          return;
+        }
+
+        const serverUpdatedAt = Number(serverState.updatedAt) || 0;
+        const localUpdatedAt = lastKnownUpdatedAtRef.current;
+
+        // Check if this browser has unsynced local changes while server is still at initial seed (updatedAt === 0)
+        if (isInitialBoot && serverUpdatedAt === 0) {
+          const defaultSerialized = JSON.stringify(
+            INITIAL_TENANTS.map((t) => enrichTenantRecord(t, DEFAULT_SETTINGS))
+          );
+          const localSerialized = JSON.stringify(
+            rawTenantsRef.current.map((t) => enrichTenantRecord(t, DEFAULT_SETTINGS))
+          );
+          if (localSerialized !== defaultSerialized) {
+            await pushStateToCloud(rawTenantsRef.current, propertiesRef.current, settingsRef.current);
+            return;
+          }
+        }
+
+        // Adopt server state if it is newer than local or on initial boot when server has saved updates
+        if (
+          serverUpdatedAt > localUpdatedAt ||
+          (isInitialBoot && localUpdatedAt === 0 && serverUpdatedAt >= 0)
+        ) {
+          lastKnownUpdatedAtRef.current = serverUpdatedAt;
+          try {
+            localStorage.setItem(STORAGE_KEY_UPDATED_AT, String(serverUpdatedAt));
+          } catch (e) {}
+
+          const nextSettings = serverState.settings
+            ? {
+                ...DEFAULT_SETTINGS,
+                ...serverState.settings,
+                expiryWarningThresholdDays:
+                  Number(serverState.settings.expiryWarningThresholdDays) || 90
+              }
+            : settingsRef.current;
+
+          if (Array.isArray(serverState.properties) && serverState.properties.length > 0) {
+            setProperties(serverState.properties);
+          }
+          if (serverState.settings) {
+            setSettings(nextSettings);
+          }
+          setRawTenants(serverState.tenants.map((t) => enrichTenantRecord(t, nextSettings)));
+        }
+      } catch (e) {
+        // Ignore transient network errors during background poll
+      }
+    },
+    [pushStateToCloud]
+  );
+
+  // Set up initial cloud pull, periodic 4-second live sync, window focus/visibility sync, and BroadcastChannel
+  useEffect(() => {
+    pullStateFromCloud(true);
+
+    const pollInterval = setInterval(() => {
+      pullStateFromCloud(false);
+    }, 4000);
+
+    const tickInterval = setInterval(() => {
+      setAutoTick((t) => t + 1);
+    }, 60000);
+
+    const handleFocusOrVisible = () => {
+      if (document.visibilityState === 'visible') {
+        pullStateFromCloud(false);
+      }
+    };
+
+    window.addEventListener('focus', handleFocusOrVisible);
+    document.addEventListener('visibilitychange', handleFocusOrVisible);
+
+    let bc = null;
+    try {
+      bc = new BroadcastChannel('plh_portal_live_sync');
+      bc.onmessage = (event) => {
+        const msg = event.data;
+        if (msg && Number(msg.updatedAt) > lastKnownUpdatedAtRef.current) {
+          lastKnownUpdatedAtRef.current = Number(msg.updatedAt);
+          if (Array.isArray(msg.tenants)) setRawTenants(msg.tenants);
+          if (Array.isArray(msg.properties)) setProperties(msg.properties);
+          if (msg.settings) setSettings(msg.settings);
+        }
+      };
+    } catch (e) {}
+
+    return () => {
+      clearInterval(pollInterval);
+      clearInterval(tickInterval);
+      window.removeEventListener('focus', handleFocusOrVisible);
+      document.removeEventListener('visibilitychange', handleFocusOrVisible);
+      if (bc) bc.close();
+    };
+  }, [pullStateFromCloud]);
 
   // Color Scheme state & listeners (following dark-mode and dark-mode-toggle guides)
   const [storedScheme, setStoredScheme] = useState(() => {
@@ -252,9 +432,19 @@ export default function App() {
     [tenants, selectedTenantId]
   );
 
+  // Helper to commit tenant list updates and sync to Cloud + all browsers/Incognito immediately
+  const commitTenantsUpdate = (updaterFn) => {
+    setRawTenants((prev) => {
+      const nextRaw = typeof updaterFn === 'function' ? updaterFn(prev) : updaterFn;
+      const nextEnriched = nextRaw.map((t) => enrichTenantRecord(t, settingsRef.current));
+      pushStateToCloud(nextEnriched, propertiesRef.current, settingsRef.current);
+      return nextEnriched;
+    });
+  };
+
   // Handlers for CRUD & Lease Actions
   const handleSaveTenantModal = (formData) => {
-    setRawTenants((prev) => {
+    commitTenantsUpdate((prev) => {
       // If converting a vacant slot into an occupied tenant record
       if (formData.originalVacantId) {
         return prev.map((item) =>
@@ -350,22 +540,22 @@ export default function App() {
     setSelectedTenantId(formData.id);
     showToast(
       editingTenant && !editingTenant.isVacantSlot
-        ? `Updated record for ${formData.name} (${formData.id})`
-        : `Registered ${formData.name} in Unit ${formData.unit}`,
+        ? `Updated & synced record for ${formData.name} (${formData.id})`
+        : `Registered & synced ${formData.name} in Unit ${formData.unit}`,
       'success'
     );
   };
 
   const handleSaveInlineDrawer = (updatedTenant) => {
-    setRawTenants((prev) =>
+    commitTenantsUpdate((prev) =>
       prev.map((item) => (item.id === selectedTenantId ? { ...item, ...updatedTenant, isVacantSlot: false } : item))
     );
     setSelectedTenantId(updatedTenant.id);
-    showToast(`Saved changes for ${updatedTenant.name} (${updatedTenant.id})`, 'success');
+    showToast(`Saved & synced changes for ${updatedTenant.name} (${updatedTenant.id})`, 'success');
   };
 
   const handleConfirmRenewLease = (tenant, renewalDetails) => {
-    setRawTenants((prev) =>
+    commitTenantsUpdate((prev) =>
       prev.map((item) => {
         if (item.id !== tenant.id) return item;
         const historyEntry = {
@@ -392,7 +582,7 @@ export default function App() {
       })
     );
     showToast(
-      `Lease renewed for ${tenant.name} (${tenant.unit}) until ${formatDateCSV(renewalDetails.contractEnd)}`,
+      `Lease renewed & synced for ${tenant.name} (${tenant.unit}) until ${formatDateCSV(renewalDetails.contractEnd)}`,
       'success'
     );
   };
@@ -401,7 +591,7 @@ export default function App() {
     if (!window.confirm(`Remove tenant record "${tenant.name}" (${tenant.id}) and mark Unit ${tenant.unit} as Vacant?`)) {
       return;
     }
-    setRawTenants((prev) =>
+    commitTenantsUpdate((prev) =>
       prev.map((item) =>
         item.id === tenant.id
           ? {
@@ -447,17 +637,19 @@ export default function App() {
       return;
     }
     const defaultVacant = INITIAL_TENANTS.filter((t) => t.isVacantSlot);
-    setRawTenants([...imported, ...defaultVacant]);
-    showToast(`Successfully ingested ${imported.length} tenant contracts from CSV!`, 'success');
+    commitTenantsUpdate([...imported, ...defaultVacant]);
+    showToast(`Successfully ingested & synced ${imported.length} tenant contracts from CSV!`, 'success');
   };
 
   const handleResetDemo = () => {
     if (!window.confirm('Reset Precourt Luxury Homes portal back to the initial 16-tenant CSV dataset?')) return;
-    setRawTenants(INITIAL_TENANTS);
+    const resetTenants = INITIAL_TENANTS.map((t) => enrichTenantRecord(t, DEFAULT_SETTINGS));
+    setRawTenants(resetTenants);
     setProperties(INITIAL_PROPERTIES);
     setSettings(DEFAULT_SETTINGS);
     setSelectedTenantId(null);
-    showToast('Portal reset to initial Precourt Luxury Homes CSV dataset', 'success');
+    pushStateToCloud(resetTenants, INITIAL_PROPERTIES, DEFAULT_SETTINGS);
+    showToast('Portal reset & synced across all browsers to initial CSV dataset', 'success');
   };
 
   const handleFilterNavigate = (targetTab, filters) => {
@@ -502,6 +694,11 @@ export default function App() {
           themeMode={renderedTheme}
           onToggleTheme={handleQuickToggleTheme}
           settings={settings}
+          syncStatus={syncStatus}
+          onForceSync={() => {
+            pullStateFromCloud(false);
+            showToast('Synced latest records from cloud', 'info');
+          }}
         />
 
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-[1600px] w-full mx-auto">
@@ -609,7 +806,8 @@ export default function App() {
               settings={settings}
               onUpdateSettings={(next) => {
                 setSettings(next);
-                showToast('Portal preferences saved successfully', 'success');
+                pushStateToCloud(rawTenantsRef.current, propertiesRef.current, next);
+                showToast('Portal preferences saved & synced across all browsers', 'success');
               }}
               colorSchemePref={colorSchemePref}
               onSetColorSchemePref={handleSetColorSchemePref}

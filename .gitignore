@@ -4,10 +4,11 @@ node_modules/
 # Build output
 dist/
 
-# Local SQLite database files
+# Local SQLite database & local state cache files
 server/*.db
 server/*.db-shm
 server/*.db-wal
+server/portal_state.json
 *.sqlite
 *.sqlite3
 
@@ -18,3 +19,5 @@ server/*.db-wal
 .DS_Store
 Thumbs.db
 .vercel/
+
+.vercel
