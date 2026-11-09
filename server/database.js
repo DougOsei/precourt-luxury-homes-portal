@@ -204,6 +204,59 @@ function initSchema() {
       updated_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS construction_projects (
+      id TEXT PRIMARY KEY,
+      project_name TEXT NOT NULL,
+      total_budget REAL NOT NULL DEFAULT 0.00,
+      currency TEXT NOT NULL DEFAULT 'GHS',
+      secondary_currency TEXT NOT NULL DEFAULT 'USD',
+      exchange_rate REAL NOT NULL DEFAULT 15.50,
+      start_date TEXT NOT NULL,
+      target_completion_date TEXT NOT NULL,
+      project_status TEXT NOT NULL DEFAULT 'ACTIVE', -- PLANNING, ACTIVE, ON_HOLD, COMPLETED
+      location TEXT NOT NULL,
+      description TEXT,
+      admin_approval_threshold REAL NOT NULL DEFAULT 10000.00,
+      updated_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS expense_categories (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      code TEXT NOT NULL UNIQUE,
+      color TEXT,
+      bg_color TEXT,
+      description TEXT,
+      icon_name TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS project_expenses (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      amount REAL NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'GHS',
+      amount_usd REAL DEFAULT 0.00,
+      payment_method TEXT NOT NULL DEFAULT 'BANK_TRANSFER', -- CASH, BANK_TRANSFER, MOBILE_MONEY, CHEQUE
+      transaction_reference TEXT,
+      vendor_name TEXT NOT NULL,
+      vendor_phone TEXT,
+      invoice_receipt_url TEXT,
+      receipt_file_name TEXT,
+      expense_date TEXT NOT NULL,
+      recorded_by_user_id TEXT,
+      recorded_by_name TEXT,
+      approval_status TEXT NOT NULL DEFAULT 'PENDING', -- PENDING, APPROVED, PAID
+      approved_by_name TEXT,
+      approved_at TEXT,
+      notes TEXT,
+      updated_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (project_id) REFERENCES construction_projects(id) ON DELETE CASCADE
+    );
   `);
 
   // Safe migrations for existing tables

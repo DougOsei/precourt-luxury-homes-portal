@@ -66,6 +66,12 @@ export default function Header({
           title: 'Annual Maintenance Fee & Facility Operations',
           subtitle: 'Track GH₵ 3,000 fee collections, quarterly AC servicing, monthly water pump maintenance, and weekly waste logs'
         };
+      case 'project-expenses':
+        return {
+          badge: 'CAPEX & CONSTRUCTION • /dashboard/projects/expenses',
+          title: 'Project Cost & Expense Tracking',
+          subtitle: 'Track new apartment construction CapEx, contractor payouts, material procurement, and burn rate'
+        };
       case 'activity-log':
         return {
           badge: 'AUDIT & ATTRIBUTION LOG',

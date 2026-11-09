@@ -133,6 +133,12 @@ module.exports = async function handler(req, res) {
           if (!Array.isArray(cloudState.facilitySchedules) && Array.isArray(memoryCache?.facilitySchedules)) {
             cloudState.facilitySchedules = memoryCache.facilitySchedules;
           }
+          if (!Array.isArray(cloudState.constructionProjects) && Array.isArray(memoryCache?.constructionProjects)) {
+            cloudState.constructionProjects = memoryCache.constructionProjects;
+          }
+          if (!Array.isArray(cloudState.projectExpenses) && Array.isArray(memoryCache?.projectExpenses)) {
+            cloudState.projectExpenses = memoryCache.projectExpenses;
+          }
           memoryCache = cloudState;
           const safeState = { ...cloudState };
           delete safeState.managers;
@@ -197,6 +203,8 @@ module.exports = async function handler(req, res) {
         settings: valid.settings,
         maintenanceFees: valid.maintenanceFees,
         facilitySchedules: valid.facilitySchedules,
+        constructionProjects: valid.constructionProjects,
+        projectExpenses: valid.projectExpenses,
         auditLogs: mergedLogs,
         updatedAt: Number(valid.updatedAt) || Date.now()
       };

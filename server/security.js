@@ -539,12 +539,58 @@ const FacilityServiceScheduleSchema = z
   })
   .passthrough();
 
+const ConstructionProjectSchema = z
+  .object({
+    id: cleanStr(60),
+    projectName: cleanStr(200),
+    totalBudget: z.coerce.number().min(0).max(10_000_000_000).default(0),
+    startDate: cleanStr(40),
+    targetCompletionDate: cleanStr(40),
+    projectStatus: z.enum(['PLANNING', 'ACTIVE', 'ON_HOLD', 'COMPLETED']).default('ACTIVE'),
+    location: cleanStr(200),
+    description: optStr(2000),
+    currency: optStr(10).default('GHS'),
+    secondaryCurrency: optStr(10).default('USD'),
+    exchangeRate: z.coerce.number().min(0.01).max(1000).default(15.5),
+    adminApprovalThreshold: z.coerce.number().min(0).max(100_000_000).default(10000),
+    updatedAt: optStr(60)
+  })
+  .passthrough();
+
+const ProjectExpenseSchema = z
+  .object({
+    id: cleanStr(60),
+    projectId: cleanStr(60),
+    categoryId: cleanStr(60),
+    title: cleanStr(250),
+    amount: z.coerce.number().min(0).max(1_000_000_000).default(0),
+    currency: optStr(10).default('GHS'),
+    amountUsd: z.coerce.number().min(0).max(1_000_000_000).optional().default(0),
+    paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'MOBILE_MONEY', 'CHEQUE']).default('BANK_TRANSFER'),
+    transactionReference: optStr(120),
+    vendorName: cleanStr(160),
+    vendorPhone: optStr(40),
+    invoiceReceiptUrl: nullableStr(10_000_000),
+    receiptFileName: optStr(200),
+    expenseDate: cleanStr(40),
+    recordedByUserId: optStr(80),
+    recordedByName: optStr(120),
+    approvalStatus: z.enum(['PENDING', 'APPROVED', 'PAID']).default('PENDING'),
+    approvedByName: nullableStr(120),
+    approvedAt: nullableStr(60),
+    notes: optStr(3000),
+    updatedAt: optStr(60)
+  })
+  .passthrough();
+
 const PortalStatePayloadSchema = z.object({
   tenants: z.array(PortalTenantRecordSchema).min(1).max(200),
   properties: z.array(PortalPropertyRecordSchema).max(50).optional(),
   settings: PortalSettingsSchema.optional(),
   maintenanceFees: z.array(MaintenanceFeeRecordSchema).max(300).optional(),
   facilitySchedules: z.array(FacilityServiceScheduleSchema).max(500).optional(),
+  constructionProjects: z.array(ConstructionProjectSchema).max(50).optional(),
+  projectExpenses: z.array(ProjectExpenseSchema).max(1000).optional(),
   auditLogs: z.array(AuditLogEntrySchema).max(250).optional(),
   auditEntry: AuditLogEntrySchema.optional(),
   updatedAt: z.coerce.number().optional()
@@ -796,6 +842,8 @@ module.exports = {
     PortalStatePayloadSchema,
     MaintenanceFeeRecordSchema,
     FacilityServiceScheduleSchema,
+    ConstructionProjectSchema,
+    ProjectExpenseSchema,
     SessionRoleSwitchSchema,
     SqlPropertySchema,
     SqlUnitSchema,

@@ -11,6 +11,7 @@ import LoginPage from './components/LoginPage';
 import ManagersAdminView from './components/ManagersAdminView';
 import ActivityLogView from './components/ActivityLogView';
 import MaintenanceFeesView from './components/MaintenanceFeesView';
+import ProjectExpensesView from './components/ProjectExpensesView';
 import TenantDrawer from './components/TenantDrawer';
 import TenantModal, {
   RenewLeaseModal,
@@ -28,6 +29,10 @@ import {
   DEFAULT_FACILITY_SCHEDULES
 } from './data/maintenanceData';
 import {
+  DEFAULT_CONSTRUCTION_PROJECTS,
+  DEFAULT_PROJECT_EXPENSES
+} from './data/constructionData';
+import {
   enrichTenantRecord,
   exportTenantsToCSV,
   parseCSVToTenants,
@@ -40,6 +45,8 @@ const STORAGE_KEY_SETTINGS = 'plh_portal_settings_v3';
 const STORAGE_KEY_AUDIT_LOGS = 'plh_portal_audit_logs_v3';
 const STORAGE_KEY_MAINTENANCE_FEES = 'plh_portal_maintenance_fees_v4';
 const STORAGE_KEY_FACILITY_SCHEDULES = 'plh_portal_facility_schedules_v4';
+const STORAGE_KEY_CONSTRUCTION_PROJECTS = 'plh_portal_construction_projects_v1';
+const STORAGE_KEY_PROJECT_EXPENSES = 'plh_portal_project_expenses_v1';
 const STORAGE_KEY_UPDATED_AT = 'plh_portal_updated_at_v3';
 
 // Helper to recover any unsynced edits from v3, v2, or v1 localStorage keys
@@ -67,6 +74,7 @@ function resolveTabFromPath(pathname) {
   if (p.startsWith('/admin/managers') || p.startsWith('/admin')) return 'managers';
   if (p.startsWith('/activity-log') || p.startsWith('/audit')) return 'activity-log';
   if (p.startsWith('/dashboard/maintenance-fees') || p.startsWith('/maintenance-fees') || p.startsWith('/facility-operations') || p.startsWith('/operations')) return 'maintenance-fees';
+  if (p.startsWith('/dashboard/projects/expenses') || p.startsWith('/projects/expenses') || p.startsWith('/projects') || p.startsWith('/construction-expenses')) return 'project-expenses';
   if (p.startsWith('/properties')) return 'properties';
   if (p.startsWith('/tenants')) return 'tenants';
   if (p.startsWith('/leases')) return 'leases';
@@ -83,6 +91,8 @@ function resolvePathFromTab(tab) {
       return '/activity-log';
     case 'maintenance-fees':
       return '/dashboard/maintenance-fees';
+    case 'project-expenses':
+      return '/dashboard/projects/expenses';
     case 'properties':
       return '/properties';
     case 'tenants':
@@ -182,6 +192,28 @@ export default function App() {
     return DEFAULT_FACILITY_SCHEDULES;
   });
 
+  const [constructionProjects, setConstructionProjects] = useState(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_CONSTRUCTION_PROJECTS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {}
+    return DEFAULT_CONSTRUCTION_PROJECTS;
+  });
+
+  const [projectExpenses, setProjectExpenses] = useState(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_PROJECT_EXPENSES);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {}
+    return DEFAULT_PROJECT_EXPENSES;
+  });
+
   // Track latest state in refs for cloud sync & polling
   const rawTenantsRef = useRef(rawTenants);
   const propertiesRef = useRef(properties);
@@ -189,6 +221,8 @@ export default function App() {
   const auditLogsRef = useRef(auditLogs);
   const maintenanceFeesRef = useRef(maintenanceFees);
   const facilitySchedulesRef = useRef(facilitySchedules);
+  const constructionProjectsRef = useRef(constructionProjects);
+  const projectExpensesRef = useRef(projectExpenses);
   const isSavingRef = useRef(false);
   const lastKnownUpdatedAtRef = useRef(
     (() => {
@@ -242,6 +276,20 @@ export default function App() {
     } catch (e) {}
   }, [facilitySchedules]);
 
+  useEffect(() => {
+    constructionProjectsRef.current = constructionProjects;
+    try {
+      localStorage.setItem(STORAGE_KEY_CONSTRUCTION_PROJECTS, JSON.stringify(constructionProjects));
+    } catch (e) {}
+  }, [constructionProjects]);
+
+  useEffect(() => {
+    projectExpensesRef.current = projectExpenses;
+    try {
+      localStorage.setItem(STORAGE_KEY_PROJECT_EXPENSES, JSON.stringify(projectExpenses));
+    } catch (e) {}
+  }, [projectExpenses]);
+
   // Push any portal state update to /api/portal-state (Cloud + Local Server + BroadcastChannel)
   const pushStateToCloud = useCallback(
     async (
@@ -250,7 +298,9 @@ export default function App() {
       nextSettings,
       auditEntry = null,
       nextFees = null,
-      nextSchedules = null
+      nextSchedules = null,
+      nextProjects = null,
+      nextExpenses = null
     ) => {
       const updatedAt = Date.now();
       lastKnownUpdatedAtRef.current = updatedAt;
@@ -263,6 +313,8 @@ export default function App() {
 
       const feesToSave = nextFees ?? maintenanceFeesRef.current;
       const schedulesToSave = nextSchedules ?? facilitySchedulesRef.current;
+      const projectsToSave = nextProjects ?? constructionProjectsRef.current;
+      const expensesToSave = nextExpenses ?? projectExpensesRef.current;
 
       if (auditEntry) {
         setAuditLogs(nextAuditLogs);
@@ -283,6 +335,8 @@ export default function App() {
           auditLogs: nextAuditLogs,
           maintenanceFees: feesToSave,
           facilitySchedules: schedulesToSave,
+          constructionProjects: projectsToSave,
+          projectExpenses: expensesToSave,
           updatedAt
         });
         bc.close();
@@ -303,6 +357,8 @@ export default function App() {
             auditLogs: nextAuditLogs,
             maintenanceFees: feesToSave,
             facilitySchedules: schedulesToSave,
+            constructionProjects: projectsToSave,
+            projectExpenses: expensesToSave,
             ...(auditEntry ? { auditEntry } : {}),
             updatedAt
           })
@@ -426,6 +482,26 @@ export default function App() {
               localStorage.setItem(
                 STORAGE_KEY_FACILITY_SCHEDULES,
                 JSON.stringify(serverState.facilitySchedules)
+              );
+            } catch (e) {}
+          }
+          if (Array.isArray(serverState.constructionProjects) && serverState.constructionProjects.length > 0) {
+            setConstructionProjects(serverState.constructionProjects);
+            constructionProjectsRef.current = serverState.constructionProjects;
+            try {
+              localStorage.setItem(
+                STORAGE_KEY_CONSTRUCTION_PROJECTS,
+                JSON.stringify(serverState.constructionProjects)
+              );
+            } catch (e) {}
+          }
+          if (Array.isArray(serverState.projectExpenses) && serverState.projectExpenses.length > 0) {
+            setProjectExpenses(serverState.projectExpenses);
+            projectExpensesRef.current = serverState.projectExpenses;
+            try {
+              localStorage.setItem(
+                STORAGE_KEY_PROJECT_EXPENSES,
+                JSON.stringify(serverState.projectExpenses)
               );
             } catch (e) {}
           }
@@ -568,6 +644,14 @@ export default function App() {
           if (Array.isArray(msg.facilitySchedules)) {
             setFacilitySchedules(msg.facilitySchedules);
             facilitySchedulesRef.current = msg.facilitySchedules;
+          }
+          if (Array.isArray(msg.constructionProjects)) {
+            setConstructionProjects(msg.constructionProjects);
+            constructionProjectsRef.current = msg.constructionProjects;
+          }
+          if (Array.isArray(msg.projectExpenses)) {
+            setProjectExpenses(msg.projectExpenses);
+            projectExpensesRef.current = msg.projectExpenses;
           }
         }
       };
@@ -1129,6 +1213,36 @@ export default function App() {
     [pushStateToCloud]
   );
 
+  const handleUpdateProjectAndExpenses = useCallback(
+    (nextProjects, nextExpenses, auditEntry) => {
+      if (nextProjects) {
+        setConstructionProjects(nextProjects);
+        constructionProjectsRef.current = nextProjects;
+        try {
+          localStorage.setItem(STORAGE_KEY_CONSTRUCTION_PROJECTS, JSON.stringify(nextProjects));
+        } catch (e) {}
+      }
+      if (nextExpenses) {
+        setProjectExpenses(nextExpenses);
+        projectExpensesRef.current = nextExpenses;
+        try {
+          localStorage.setItem(STORAGE_KEY_PROJECT_EXPENSES, JSON.stringify(nextExpenses));
+        } catch (e) {}
+      }
+      pushStateToCloud(
+        rawTenantsRef.current,
+        propertiesRef.current,
+        settingsRef.current,
+        auditEntry,
+        maintenanceFeesRef.current,
+        facilitySchedulesRef.current,
+        nextProjects ?? constructionProjectsRef.current,
+        nextExpenses ?? projectExpensesRef.current
+      );
+    },
+    [pushStateToCloud]
+  );
+
   const handleExportCSV = (customSubset = null) => {
     const listToExport = Array.isArray(customSubset) ? customSubset : tenants;
     exportTenantsToCSV(listToExport, 'Precourt_Luxury_Homes_Tenants_Export.csv');
@@ -1279,6 +1393,8 @@ export default function App() {
               auditLogs={auditLogs}
               maintenanceFees={maintenanceFees}
               facilitySchedules={facilitySchedules}
+              constructionProjects={constructionProjects}
+              projectExpenses={projectExpenses}
             />
           )}
 
@@ -1293,6 +1409,16 @@ export default function App() {
               settings={settings}
               onSelectTenant={(t) => setSelectedTenantId(t.id)}
               onShowToast={showToast}
+            />
+          )}
+
+          {currentTab === 'project-expenses' && (
+            <ProjectExpensesView
+              projects={constructionProjects}
+              expenses={projectExpenses}
+              onUpdateProjectAndExpenses={handleUpdateProjectAndExpenses}
+              currentUser={authUser}
+              showToast={showToast}
             />
           )}
 

@@ -17,7 +17,8 @@ import {
   ChevronRight,
   Calendar,
   Activity,
-  Wrench
+  Wrench,
+  HardHat
 } from 'lucide-react';
 import {
   formatCurrency,
@@ -39,7 +40,9 @@ export default function Dashboard({
   onFilterNavigate,
   auditLogs = [],
   maintenanceFees = [],
-  facilitySchedules = []
+  facilitySchedules = [],
+  constructionProjects = [],
+  projectExpenses = []
 }) {
   const [propertyChartMode, setPropertyChartMode] = useState('units'); // 'units' | 'revenue'
   const [selectedTimelineBucket, setSelectedTimelineBucket] = useState(null);
@@ -451,6 +454,79 @@ export default function Dashboard({
           </div>
         </div>
       </div>
+
+      {/* 1C. Construction & Development CapEx Tracker Spotlight */}
+      {(() => {
+        const prj = constructionProjects[0] || {
+          projectName: 'Precourt Luxury Apartments - Phase 1',
+          totalBudget: 4500000,
+          location: 'Airport Residential Area, Accra'
+        };
+        const totalBudget = Number(prj.totalBudget) || 4500000;
+        const totalSpent = projectExpenses
+          .filter((e) => e.approvalStatus === 'APPROVED' || e.approvalStatus === 'PAID')
+          .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+        const pendingCount = projectExpenses.filter((e) => e.approvalStatus === 'PENDING').length;
+        const percentSpent = Math.min(100, Math.round((totalSpent / totalBudget) * 100));
+
+        return (
+          <div
+            onClick={() => onNavigate('project-expenses')}
+            className="group p-4 sm:p-5 rounded-2xl border border-amber-500/30 hover:border-amber-500/60 bg-gradient-to-r from-amber-50/60 via-white to-slate-50 dark:from-slate-900 dark:via-slate-900 dark:to-slate-900/90 transition-all cursor-pointer shadow-xs hover:shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4"
+          >
+            <div className="flex items-start sm:items-center gap-3.5">
+              <div className="p-3 rounded-2xl shrink-0 bg-amber-500/15 text-amber-700 dark:text-amber-400">
+                <HardHat className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-800 dark:text-amber-300">
+                    CONSTRUCTION & CAPEX
+                  </span>
+                  <span className="text-xs text-slate-500 dark:text-slate-400 font-semibold hidden sm:inline">
+                    {prj.location}
+                  </span>
+                  {pendingCount > 0 && (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-500 text-slate-950 animate-pulse">
+                      {pendingCount} Pending Approvals
+                    </span>
+                  )}
+                </div>
+                <h3 className="font-extrabold text-sm sm:text-base text-slate-900 dark:text-white mt-0.5">
+                  {prj.projectName}
+                </h3>
+                <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
+                  Track material purchases, contractor payouts, municipal permits, and monthly burn rate.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-4 sm:gap-6 shrink-0 self-end md:self-center">
+              <div className="text-right">
+                <span className="text-[10px] uppercase font-bold text-slate-400 block">Total CapEx Spent</span>
+                <span className="text-base font-black font-mono text-slate-900 dark:text-white">
+                  GH₵ {totalSpent.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                </span>
+                <span className="text-[10px] text-slate-500 dark:text-slate-400 block font-semibold">
+                  {percentSpent}% of GH₵ {(totalBudget / 1000000).toFixed(1)}M Budget
+                </span>
+              </div>
+              <div className="text-right pl-4 border-l border-slate-200 dark:border-slate-800 hidden sm:block">
+                <span className="text-[10px] uppercase font-bold text-slate-400 block">Remaining</span>
+                <span className="text-base font-black font-mono text-emerald-600 dark:text-emerald-400">
+                  GH₵ {Math.max(0, totalBudget - totalSpent).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                </span>
+                <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
+                  {projectExpenses.length} Logged Entries
+                </span>
+              </div>
+              <div className="p-2 rounded-xl bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 group-hover:bg-amber-500 group-hover:text-slate-950 transition shadow-2xs">
+                <ChevronRight className="w-4 h-4" />
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* 2. Three Visual Analytics Cards */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">

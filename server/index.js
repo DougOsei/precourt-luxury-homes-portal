@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const db = require('./database');
-const { seedDatabase } = require('./seed');
+const { seedDatabase, ensureConstructionSeeded } = require('./seed');
 const {
   applySecurityHeaders,
   enforceFetchMetadataIsolation,
@@ -47,8 +47,21 @@ app.use(
   })
 );
 
-// Enforce 512 KB max JSON body payload to mitigate DoS (Phase 5)
-app.use(express.json({ limit: '512kb' }));
+// Allow up to 15 MB JSON payload for receipt uploads & full sync (Phase 5)
+app.use(express.json({ limit: '15mb' }));
+
+// Static uploads serving for uploaded receipts, invoices, and waybills
+const uploadsDir = path.join(__dirname, '..', 'uploads');
+const receiptsDir = path.join(uploadsDir, 'receipts');
+if (!fs.existsSync(receiptsDir)) {
+  try {
+    fs.mkdirSync(receiptsDir, { recursive: true });
+  } catch (e) {}
+}
+app.use('/uploads', express.static(uploadsDir));
+
+// Ensure SQLite has default construction project and expense ledger
+ensureConstructionSeeded();
 
 // -------------------------------------------------------------
 // PHASE 3: AUTHENTICATION & SUPER ADMIN MANAGER PROVISIONING ENDPOINTS
@@ -174,6 +187,12 @@ app.get('/api/portal-state', async (req, res) => {
       if (!Array.isArray(resolvedState.facilitySchedules) && Array.isArray(localState?.facilitySchedules)) {
         resolvedState.facilitySchedules = localState.facilitySchedules;
       }
+      if (!Array.isArray(resolvedState.constructionProjects) && Array.isArray(localState?.constructionProjects)) {
+        resolvedState.constructionProjects = localState.constructionProjects;
+      }
+      if (!Array.isArray(resolvedState.projectExpenses) && Array.isArray(localState?.projectExpenses)) {
+        resolvedState.projectExpenses = localState.projectExpenses;
+      }
       fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(resolvedState, null, 2), 'utf8');
     }
 
@@ -235,6 +254,8 @@ app.put(
         settings: valid.settings,
         maintenanceFees: valid.maintenanceFees,
         facilitySchedules: valid.facilitySchedules,
+        constructionProjects: valid.constructionProjects,
+        projectExpenses: valid.projectExpenses,
         auditLogs: mergedLogs,
         managers: existingManagers,
         updatedAt: Number(valid.updatedAt) || Date.now()
@@ -1887,6 +1908,297 @@ app.post('/api/seed/reset', (req, res) => {
     res.json({ success: true, message: 'Database reset to demo state' });
   } catch (err) {
     safeErrorResponse(res, err, 'POST /api/seed/reset');
+  }
+});
+
+// -------------------------------------------------------------
+// CONSTRUCTION PROJECTS & EXPENSES CAPEX MODULE ENDPOINTS
+// -------------------------------------------------------------
+
+// Upload receipt/invoice/waybill file (max 10MB; PNG, JPEG, WEBP, PDF)
+app.post('/api/uploads/receipt', async (req, res) => {
+  const session = requireAuth(req, res, ['SUPER_ADMIN', 'FACILITY_MANAGER']);
+  if (!session) return;
+
+  try {
+    const { fileName, fileType, fileData } = req.body || {};
+    if (!fileData || typeof fileData !== 'string') {
+      return res.status(400).json({ ok: false, error: 'No file data received.' });
+    }
+
+    const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'application/pdf'];
+    const detectedType = (fileType || '').toLowerCase();
+    if (!allowedTypes.includes(detectedType) && !detectedType.startsWith('image/')) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Unsupported file type. Please upload a PNG, JPEG, WEBP, or PDF receipt/waybill.'
+      });
+    }
+
+    // Extract base64 payload
+    const base64Index = fileData.indexOf(';base64,');
+    const rawBase64 = base64Index !== -1 ? fileData.slice(base64Index + 8) : fileData;
+    const buffer = Buffer.from(rawBase64, 'base64');
+
+    // 10 MB limit
+    const MAX_FILE_BYTES = 10 * 1024 * 1024;
+    if (buffer.length > MAX_FILE_BYTES) {
+      return res.status(413).json({
+        ok: false,
+        error: 'File size exceeds maximum allowed limit of 10 MB.'
+      });
+    }
+
+    // Determine safe file extension
+    let ext = '.png';
+    if (detectedType.includes('pdf')) ext = '.pdf';
+    else if (detectedType.includes('jpeg') || detectedType.includes('jpg')) ext = '.jpg';
+    else if (detectedType.includes('webp')) ext = '.webp';
+
+    const safeBaseName = (fileName || 'receipt')
+      .replace(/[^a-zA-Z0-9_-]/g, '_')
+      .slice(0, 40);
+    const uniqueFileName = `${Date.now()}-${uuidv4().slice(0, 8)}-${safeBaseName}${ext}`;
+    const targetPath = path.join(receiptsDir, uniqueFileName);
+
+    fs.writeFileSync(targetPath, buffer);
+
+    const publicUrl = `/uploads/receipts/${uniqueFileName}`;
+    res.json({
+      ok: true,
+      url: publicUrl,
+      fileName: fileName || uniqueFileName,
+      sizeBytes: buffer.length
+    });
+  } catch (err) {
+    safeErrorResponse(res, err, 'POST /api/uploads/receipt');
+  }
+});
+
+// GET /api/projects - List construction projects with category metadata
+app.get('/api/projects', (req, res) => {
+  try {
+    const projects = db.prepare('SELECT * FROM construction_projects ORDER BY created_at DESC').all();
+    const categories = db.prepare('SELECT * FROM expense_categories ORDER BY id ASC').all();
+    res.json({ ok: true, projects, categories });
+  } catch (err) {
+    safeErrorResponse(res, err, 'GET /api/projects');
+  }
+});
+
+// PUT /api/projects/:id - Update construction project budget & configuration (SUPER_ADMIN only)
+app.put('/api/projects/:id', (req, res) => {
+  const session = requireAuth(req, res, ['SUPER_ADMIN']);
+  if (!session) return;
+
+  try {
+    const { id } = req.params;
+    const body = req.body || {};
+    const existing = db.prepare('SELECT * FROM construction_projects WHERE id = ?').get(id);
+    if (!existing) {
+      return res.status(404).json({ ok: false, error: 'Construction project not found.' });
+    }
+
+    const totalBudget = body.totalBudget !== undefined ? Number(body.totalBudget) : existing.total_budget;
+    const projectName = body.projectName || existing.project_name;
+    const projectStatus = body.projectStatus || existing.project_status;
+    const startDate = body.startDate || existing.start_date;
+    const targetCompletionDate = body.targetCompletionDate || existing.target_completion_date;
+    const location = body.location || existing.location;
+    const description = body.description !== undefined ? body.description : existing.description;
+    const exchangeRate = body.exchangeRate !== undefined ? Number(body.exchangeRate) : existing.exchange_rate;
+    const adminApprovalThreshold = body.adminApprovalThreshold !== undefined ? Number(body.adminApprovalThreshold) : existing.admin_approval_threshold;
+    const updatedAt = new Date().toISOString();
+
+    db.prepare(`
+      UPDATE construction_projects
+      SET project_name = ?, total_budget = ?, project_status = ?, start_date = ?,
+          target_completion_date = ?, location = ?, description = ?, exchange_rate = ?,
+          admin_approval_threshold = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      projectName, totalBudget, projectStatus, startDate,
+      targetCompletionDate, location, description, exchangeRate,
+      adminApprovalThreshold, updatedAt, id
+    );
+
+    // Record audit log
+    db.prepare(`
+      INSERT INTO audit_logs (id, action, category, actor_id, actor_name, actor_email, actor_role, target_id, target_label, details, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `).run(
+      uuidv4(), 'PROJECT_BUDGET_UPDATED', 'record_update',
+      session.sub, session.fullName, session.email, session.role,
+      id, projectName,
+      `Updated project configuration: Budget set to GH₵ ${totalBudget.toLocaleString()} (Threshold: GH₵ ${adminApprovalThreshold.toLocaleString()})`
+    );
+
+    const updated = db.prepare('SELECT * FROM construction_projects WHERE id = ?').get(id);
+    res.json({ ok: true, project: updated });
+  } catch (err) {
+    safeErrorResponse(res, err, 'PUT /api/projects/:id');
+  }
+});
+
+// GET /api/projects/:id/expenses - List expenses for a project
+app.get('/api/projects/:id/expenses', (req, res) => {
+  try {
+    const { id } = req.params;
+    const expenses = db.prepare('SELECT * FROM project_expenses WHERE project_id = ? ORDER BY expense_date DESC, created_at DESC').all(id);
+    res.json({ ok: true, expenses });
+  } catch (err) {
+    safeErrorResponse(res, err, 'GET /api/projects/:id/expenses');
+  }
+});
+
+// POST /api/projects/:id/expenses - Log new expense (SUPER_ADMIN or FACILITY_MANAGER)
+app.post('/api/projects/:id/expenses', (req, res) => {
+  const session = requireAuth(req, res, ['SUPER_ADMIN', 'FACILITY_MANAGER']);
+  if (!session) return;
+
+  try {
+    const { id: projectId } = req.params;
+    const project = db.prepare('SELECT * FROM construction_projects WHERE id = ?').get(projectId);
+    if (!project) {
+      return res.status(404).json({ ok: false, error: 'Project not found.' });
+    }
+
+    const body = req.body || {};
+    const amount = Number(body.amount) || 0;
+    if (amount <= 0) {
+      return res.status(400).json({ ok: false, error: 'Expense amount must be greater than 0.' });
+    }
+
+    const threshold = Number(project.admin_approval_threshold) || 10000;
+    const isSuperAdmin = session.role === 'SUPER_ADMIN';
+
+    // If logged by Facility Manager and amount > threshold, force PENDING
+    let finalStatus = 'APPROVED';
+    if (!isSuperAdmin && amount > threshold) {
+      finalStatus = 'PENDING';
+    } else if (body.approvalStatus && ['PENDING', 'APPROVED', 'PAID'].includes(body.approvalStatus)) {
+      finalStatus = body.approvalStatus;
+    }
+
+    const expenseId = body.id || `EXP-${new Date().getFullYear()}-${uuidv4().slice(0, 6).toUpperCase()}`;
+    const exchangeRate = Number(project.exchange_rate) || 15.5;
+    const amountUsd = Math.round((amount / exchangeRate) * 100) / 100;
+    const nowIso = new Date().toISOString();
+
+    db.prepare(`
+      INSERT INTO project_expenses (
+        id, project_id, category_id, title, amount, currency, amount_usd,
+        payment_method, transaction_reference, vendor_name, vendor_phone,
+        invoice_receipt_url, receipt_file_name, expense_date, recorded_by_user_id,
+        recorded_by_name, approval_status, approved_by_name, approved_at, notes, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      expenseId,
+      projectId,
+      body.categoryId || 'CONTINGENCY_SITE_OVERHEAD',
+      body.title || 'Construction Site Expense',
+      amount,
+      body.currency || 'GHS',
+      amountUsd,
+      body.paymentMethod || 'BANK_TRANSFER',
+      body.transactionReference || '',
+      body.vendorName || 'General Supplier',
+      body.vendorPhone || '',
+      body.invoiceReceiptUrl || null,
+      body.receiptFileName || null,
+      body.expenseDate || new Date().toISOString().slice(0, 10),
+      session.sub || 'manager',
+      session.fullName || 'Authorized Staff',
+      finalStatus,
+      finalStatus === 'APPROVED' || finalStatus === 'PAID' ? session.fullName : null,
+      finalStatus === 'APPROVED' || finalStatus === 'PAID' ? nowIso : null,
+      body.notes || '',
+      nowIso
+    );
+
+    // Audit log entry
+    db.prepare(`
+      INSERT INTO audit_logs (id, action, category, actor_id, actor_name, actor_email, actor_role, target_id, target_label, details, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `).run(
+      uuidv4(), 'PROJECT_EXPENSE_LOGGED', 'record_update',
+      session.sub, session.fullName, session.email, session.role,
+      expenseId, body.title || 'Construction Site Expense',
+      `Logged expense of GH₵ ${amount.toLocaleString()} for ${body.vendorName || 'Supplier'} (Status: ${finalStatus})`
+    );
+
+    const saved = db.prepare('SELECT * FROM project_expenses WHERE id = ?').get(expenseId);
+    res.json({ ok: true, expense: saved });
+  } catch (err) {
+    safeErrorResponse(res, err, 'POST /api/projects/:id/expenses');
+  }
+});
+
+// PATCH /api/projects/expenses/:id/approve - Approve pending expense (SUPER_ADMIN only)
+app.patch('/api/projects/expenses/:id/approve', (req, res) => {
+  const session = requireAuth(req, res, ['SUPER_ADMIN']);
+  if (!session) return;
+
+  try {
+    const { id } = req.params;
+    const existing = db.prepare('SELECT * FROM project_expenses WHERE id = ?').get(id);
+    if (!existing) {
+      return res.status(404).json({ ok: false, error: 'Expense record not found.' });
+    }
+
+    const nowIso = new Date().toISOString();
+    db.prepare(`
+      UPDATE project_expenses
+      SET approval_status = 'APPROVED', approved_by_name = ?, approved_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(session.fullName, nowIso, nowIso, id);
+
+    // Audit entry
+    db.prepare(`
+      INSERT INTO audit_logs (id, action, category, actor_id, actor_name, actor_email, actor_role, target_id, target_label, details, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `).run(
+      uuidv4(), 'PROJECT_EXPENSE_APPROVED', 'record_update',
+      session.sub, session.fullName, session.email, session.role,
+      id, existing.title,
+      `Super Admin approved construction expense of GH₵ ${Number(existing.amount).toLocaleString()}`
+    );
+
+    const updated = db.prepare('SELECT * FROM project_expenses WHERE id = ?').get(id);
+    res.json({ ok: true, expense: updated });
+  } catch (err) {
+    safeErrorResponse(res, err, 'PATCH /api/projects/expenses/:id/approve');
+  }
+});
+
+// DELETE /api/projects/expenses/:id - Delete expense (SUPER_ADMIN only)
+app.delete('/api/projects/expenses/:id', (req, res) => {
+  const session = requireAuth(req, res, ['SUPER_ADMIN']);
+  if (!session) return;
+
+  try {
+    const { id } = req.params;
+    const existing = db.prepare('SELECT * FROM project_expenses WHERE id = ?').get(id);
+    if (!existing) {
+      return res.status(404).json({ ok: false, error: 'Expense record not found.' });
+    }
+
+    db.prepare('DELETE FROM project_expenses WHERE id = ?').run(id);
+
+    // Audit entry
+    db.prepare(`
+      INSERT INTO audit_logs (id, action, category, actor_id, actor_name, actor_email, actor_role, target_id, target_label, details, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `).run(
+      uuidv4(), 'PROJECT_EXPENSE_DELETED', 'record_update',
+      session.sub, session.fullName, session.email, session.role,
+      id, existing.title,
+      `Super Admin deleted construction expense of GH₵ ${Number(existing.amount).toLocaleString()}`
+    );
+
+    res.json({ ok: true, message: 'Expense deleted successfully.' });
+  } catch (err) {
+    safeErrorResponse(res, err, 'DELETE /api/projects/expenses/:id');
   }
 });
 

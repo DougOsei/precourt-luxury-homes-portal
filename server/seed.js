@@ -420,14 +420,103 @@ function seedDatabase() {
       );
     });
 
+    seedConstructionData();
   });
 
   transaction();
   console.log('Database successfully seeded: 16 tenants (PLH-AM & PLH-KW), Super Admin account, and Facility Manager Douglas Amadie.');
 }
 
+function seedConstructionData() {
+  const insertCategory = db.prepare(`
+    INSERT OR REPLACE INTO expense_categories (id, name, code, color, bg_color, description, icon_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const categories = [
+    { id: 'PERMITS_LEGAL', name: 'Permits & Legal', code: 'PERMITS_LEGAL', color: '#3B82F6', bgColor: 'bg-blue-500/10 text-blue-700', description: 'Town planning, building permits, EPA, land registration', iconName: 'FileCheck' },
+    { id: 'ARCHITECTURAL_ENGINEERING', name: 'Architectural & Engineering', code: 'ARCHITECTURAL_ENGINEERING', color: '#8B5CF6', bgColor: 'bg-purple-500/10 text-purple-700', description: 'Structural drawings, MEP designs, soil tests', iconName: 'Compass' },
+    { id: 'SUBSTRUCTURE_FOUNDATION', name: 'Substructure & Foundation', code: 'SUBSTRUCTURE_FOUNDATION', color: '#D97706', bgColor: 'bg-amber-500/10 text-amber-700', description: 'Excavation, sand, stones, cement, iron rods, concrete', iconName: 'Layers' },
+    { id: 'SUPERSTRUCTURE_BLOCKWORK', name: 'Superstructure & Blockwork', code: 'SUPERSTRUCTURE_BLOCKWORK', color: '#10B981', bgColor: 'bg-emerald-500/10 text-emerald-700', description: 'Blocks, lintels, columns, formwork, scaffolding', iconName: 'Building2' },
+    { id: 'ROOFING_WATERPROOFING', name: 'Roofing & Waterproofing', code: 'ROOFING_WATERPROOFING', color: '#06B6D4', bgColor: 'bg-cyan-500/10 text-cyan-700', description: 'Trusses, roofing sheets, membrane waterproofing', iconName: 'Umbrella' },
+    { id: 'MEP_SERVICES', name: 'MEP Services', code: 'MEP_SERVICES', color: '#F59E0B', bgColor: 'bg-yellow-500/10 text-yellow-800', description: 'Electrical conduits/wiring, plumbing pipes, septic tanks, water storage', iconName: 'Zap' },
+    { id: 'FINISHING', name: 'Finishing & Fixtures', code: 'FINISHING', color: '#EC4899', bgColor: 'bg-pink-500/10 text-pink-700', description: 'Tiling, plastering, painting, ceiling/P.O.P., doors, aluminum/glass windows', iconName: 'Palette' },
+    { id: 'LABOR_CONTRACTORS', name: 'Labor & Contractors', code: 'LABOR_CONTRACTORS', color: '#F97316', bgColor: 'bg-orange-500/10 text-orange-700', description: 'Masons, steel benders, carpenters, day labor, electrician fees', iconName: 'HardHat' },
+    { id: 'EQUIPMENT_HAULAGE', name: 'Equipment & Haulage', code: 'EQUIPMENT_HAULAGE', color: '#6366F1', bgColor: 'bg-indigo-500/10 text-indigo-700', description: 'Concrete mixer rentals, excavator hire, tipper truck delivery fees', iconName: 'Truck' },
+    { id: 'CONTINGENCY_SITE_OVERHEAD', name: 'Site Overhead & Contingency', code: 'CONTINGENCY_SITE_OVERHEAD', color: '#64748B', bgColor: 'bg-slate-500/10 text-slate-700', description: 'Site security, water/generator fuel, temporary site office', iconName: 'ShieldAlert' }
+  ];
+
+  categories.forEach(cat => {
+    insertCategory.run(cat.id, cat.name, cat.code, cat.color, cat.bgColor, cat.description, cat.iconName);
+  });
+
+  const insertProject = db.prepare(`
+    INSERT OR REPLACE INTO construction_projects (
+      id, project_name, total_budget, currency, secondary_currency, exchange_rate,
+      start_date, target_completion_date, project_status, location, description,
+      admin_approval_threshold, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  insertProject.run(
+    'PRJ-PLH-PH1',
+    'Precourt Luxury Apartments - Phase 1',
+    4500000.0,
+    'GHS',
+    'USD',
+    15.5,
+    '2026-01-15',
+    '2026-12-20',
+    'ACTIVE',
+    'Airport Residential Area, Accra',
+    'Ultra-luxury 12-unit residential apartment development featuring private balconies, rooftop infinity pool, and underground parking.',
+    10000.0,
+    new Date().toISOString()
+  );
+
+  const insertExpense = db.prepare(`
+    INSERT OR REPLACE INTO project_expenses (
+      id, project_id, category_id, title, amount, currency, amount_usd,
+      payment_method, transaction_reference, vendor_name, vendor_phone,
+      invoice_receipt_url, receipt_file_name, expense_date, recorded_by_user_id,
+      recorded_by_name, approval_status, approved_by_name, approved_at, notes, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const initialExpenses = [
+    ['EXP-2026-001', 'PRJ-PLH-PH1', 'PERMITS_LEGAL', 'Accra Metropolitan Assembly (AMA) Building Permit & Planning Approval', 38500.0, 'GHS', 2483.87, 'BANK_TRANSFER', 'AMA-BLD-2026-904', 'Accra Metropolitan Assembly (Town Planning Dept)', '+233 30 266 5471', 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=1200&q=80', 'AMA_Building_Permit_Receipt.pdf', '2026-01-22', 'admin-kwame', 'Kwame Mensah (Super Admin)', 'PAID', 'Kwame Mensah', '2026-01-22T10:00:00Z', 'Official municipal permit receipt covering architectural, structural & fire compliance.', new Date().toISOString()],
+    ['EXP-2026-002', 'PRJ-PLH-PH1', 'ARCHITECTURAL_ENGINEERING', 'Geotechnical Soil Investigation & Core Boring Test (4 Boreholes)', 18000.0, 'GHS', 1161.29, 'BANK_TRANSFER', 'GTC-INV-8821', 'GeoTech Consult Ghana Ltd', '+233 24 331 9081', 'https://images.unsplash.com/photo-1450133064473-71024230f91b?auto=format&fit=crop&w=1200&q=80', 'GeoTech_Soil_Test_Report.pdf', '2026-01-28', 'douglas.amadie', 'Douglas Amadie (Facility Manager)', 'APPROVED', 'Kwame Mensah', '2026-01-29T14:15:00Z', 'Bearing capacity verified at 220 kPa for foundation pad design.', new Date().toISOString()],
+    ['EXP-2026-003', 'PRJ-PLH-PH1', 'EQUIPMENT_HAULAGE', 'Site Excavation & Earth Removal (CAT 320D Excavator - 5 Days)', 27500.0, 'GHS', 1774.19, 'CHEQUE', 'CHQ-880192', 'Nana Kofi Heavy Equipment & Haulage Ltd', '+233 50 442 8810', 'https://images.unsplash.com/photo-1578575437130-527eed3abbec?auto=format&fit=crop&w=1200&q=80', 'Excavator_Rental_Waybill_01.pdf', '2026-02-05', 'douglas.amadie', 'Douglas Amadie (Facility Manager)', 'PAID', 'Kwame Mensah', '2026-02-06T09:30:00Z', 'Basement and pad foundation trench excavation including 14 tipper truck trips to landfill.', new Date().toISOString()],
+    ['EXP-2026-004', 'PRJ-PLH-PH1', 'SUBSTRUCTURE_FOUNDATION', 'High-Tensile Steel Rebars (16mm, 12mm & 10mm High-Yield Rods - 15 Tons)', 142500.0, 'GHS', 9193.55, 'BANK_TRANSFER', 'B5-WT-99320', 'B5 Plus Steel Industries Ltd', '+233 30 330 2001', 'https://images.unsplash.com/photo-1504917599217-d4dc5ebe6122?auto=format&fit=crop&w=1200&q=80', 'B5_Plus_Rebar_Invoice_15T.pdf', '2026-02-14', 'admin-kwame', 'Kwame Mensah (Super Admin)', 'PAID', 'Kwame Mensah', '2026-02-14T11:00:00Z', 'Grade 500B high-yield rebars certified for raft foundation and column starter bars.', new Date().toISOString()],
+    ['EXP-2026-005', 'PRJ-PLH-PH1', 'SUBSTRUCTURE_FOUNDATION', 'Bulk Portland Cement (600 Bags of Ghacem 42.5R Super Rapid Hardening)', 67200.0, 'GHS', 4335.48, 'BANK_TRANSFER', 'GHACEM-DISP-4402', 'Ghacem Ghana Cement Distributors', '+233 24 559 1100', 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=1200&q=80', 'Ghacem_Cement_Delivery_Waybill.pdf', '2026-02-20', 'douglas.amadie', 'Douglas Amadie (Facility Manager)', 'PAID', 'Kwame Mensah', '2026-02-21T08:45:00Z', 'GH₵ 112 per bag including delivery to site offloading zone.', new Date().toISOString()],
+    ['EXP-2026-006', 'PRJ-PLH-PH1', 'LABOR_CONTRACTORS', 'Foundation Steel Bending & Formwork Carpentry Gang Labor Payout (Stage 1)', 22000.0, 'GHS', 1419.35, 'MOBILE_MONEY', 'MTN-MM-20260228-40192', 'Kofi Mensah Artisan Steel Benders Gang', '+233 24 991 3302', 'https://images.unsplash.com/photo-1541888946425-d0fbb186c5f7?auto=format&fit=crop&w=1200&q=80', 'Steel_Benders_Labor_Disbursement_Sheet.pdf', '2026-02-28', 'douglas.amadie', 'Douglas Amadie (Facility Manager)', 'PAID', 'Kwame Mensah', '2026-02-28T16:00:00Z', 'Signed wage sheet for 14 artisans for raft rebars and stub columns fabrication.', new Date().toISOString()],
+    ['EXP-2026-007', 'PRJ-PLH-PH1', 'SUBSTRUCTURE_FOUNDATION', 'Ready-Mix Concrete Pouring (Grade C30/37 - 85 Cubic Meters via Boom Pump)', 114750.0, 'GHS', 7403.23, 'BANK_TRANSFER', 'ATL-CONC-88120', 'Atlantic Ready-Mix Concrete Ltd', '+233 30 221 4400', 'https://images.unsplash.com/photo-1589939705384-5185137a7f0f?auto=format&fit=crop&w=1200&q=80', 'Atlantic_ReadyMix_Concrete_BatchTicket.pdf', '2026-03-08', 'admin-kwame', 'Kwame Mensah (Super Admin)', 'PAID', 'Kwame Mensah', '2026-03-08T18:00:00Z', 'Continuous raft foundation slab pour with slump test verification (120mm).', new Date().toISOString()],
+    ['EXP-2026-008', 'PRJ-PLH-PH1', 'SUPERSTRUCTURE_BLOCKWORK', '6-inch Solid Vibrated Concrete Blocks (4,500 Units - First Batch)', 40500.0, 'GHS', 2612.90, 'BANK_TRANSFER', 'QBK-INV-1092', 'Quality Block Factory & Precast Ltd', '+233 20 812 7701', 'https://images.unsplash.com/photo-1584467541268-b040f83be3fd?auto=format&fit=crop&w=1200&q=80', 'Block_Delivery_Waybill_Batch1.pdf', '2026-03-18', 'douglas.amadie', 'Douglas Amadie (Facility Manager)', 'APPROVED', 'Kwame Mensah', '2026-03-19T10:10:00Z', 'GH₵ 9.00 per unit including stacking on ground floor slab.', new Date().toISOString()],
+    ['EXP-2026-009', 'PRJ-PLH-PH1', 'MEP_SERVICES', 'Ground Plumbing Sub-drainage & HDPE Sewage Pipe Line (Schedule 40 & Fittings)', 19800.0, 'GHS', 1277.42, 'MOBILE_MONEY', 'MTN-MM-20260325-11029', 'AquaFlow Plumbing Supplies Ltd', '+233 24 661 8021', 'https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=1200&q=80', 'AquaFlow_HDPE_Plumbing_Receipt.pdf', '2026-03-25', 'douglas.amadie', 'Douglas Amadie (Facility Manager)', 'APPROVED', 'Kwame Mensah', '2026-03-26T12:00:00Z', '110mm and 160mm sewer pipes embedded before ground slab casting.', new Date().toISOString()],
+    ['EXP-2026-010', 'PRJ-PLH-PH1', 'CONTINGENCY_SITE_OVERHEAD', 'Site Security Guards 24/7 Patrol Allowance (Feb - Mar 2026)', 6400.0, 'GHS', 412.90, 'CASH', 'SEC-CSH-2026-03', 'Apex Shield Guard Services', '+233 50 119 2200', 'https://images.unsplash.com/photo-1557804506-669a67965ba0?auto=format&fit=crop&w=1200&q=80', 'Apex_Security_Monthly_Invoice.pdf', '2026-03-31', 'douglas.amadie', 'Douglas Amadie (Facility Manager)', 'PAID', 'Kwame Mensah', '2026-03-31T17:00:00Z', 'Two 12-hour shifts daily protecting cement depot and rebars.', new Date().toISOString()],
+    ['EXP-2026-011', 'PRJ-PLH-PH1', 'LABOR_CONTRACTORS', 'Masons Gang Masonry Wall Construction Payout (Ground to First Floor)', 16500.0, 'GHS', 1064.52, 'MOBILE_MONEY', 'MTN-MM-20260408-55102', 'Master Yaw Boakye Masons Guild', '+233 24 772 1092', 'https://images.unsplash.com/photo-1503387762-592deb58ef4e?auto=format&fit=crop&w=1200&q=80', 'Masons_Guild_Wage_Invoice.pdf', '2026-04-08', 'douglas.amadie', 'Douglas Amadie (Facility Manager)', 'PENDING', null, null, 'Requires Super Admin approval (> GH₵ 10,000 threshold). 10 masons and 12 laborers.', new Date().toISOString()],
+    ['EXP-2026-012', 'PRJ-PLH-PH1', 'SUBSTRUCTURE_FOUNDATION', 'Marine Plywood & Scaffolding Boards for First Floor Suspended Slab Formwork', 28500.0, 'GHS', 1838.71, 'CHEQUE', 'CHQ-880211', 'Woodland Timber & Plywood Depot Ltd', '+233 20 551 8890', 'https://images.unsplash.com/photo-1513694203232-719a280e022f?auto=format&fit=crop&w=1200&q=80', 'Woodland_Formwork_Plywood_Waybill.pdf', '2026-04-12', 'douglas.amadie', 'Douglas Amadie (Facility Manager)', 'PENDING', null, null, 'Requires Super Admin approval (> GH₵ 10,000 threshold). 18mm film-faced marine boards.', new Date().toISOString()]
+  ];
+
+  initialExpenses.forEach(exp => {
+    insertExpense.run(...exp);
+  });
+}
+
+function ensureConstructionSeeded() {
+  try {
+    const existing = db.prepare('SELECT count(*) as count FROM construction_projects').get();
+    if (!existing || existing.count === 0) {
+      seedConstructionData();
+      console.log('Seeded default construction project and initial expense ledger.');
+    }
+  } catch (e) {
+    console.error('Error verifying construction seed:', e.message);
+  }
+}
+
 if (require.main === module) {
   seedDatabase();
 }
 
-module.exports = { seedDatabase };
+module.exports = { seedDatabase, ensureConstructionSeeded };
