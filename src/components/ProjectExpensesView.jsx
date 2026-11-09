@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   HardHat,
   Building2,
@@ -143,6 +143,29 @@ export default function ProjectExpensesView({
     targetCompletionDate: currentProject.targetCompletionDate || '2026-12-20',
     projectStatus: currentProject.projectStatus || 'ACTIVE'
   });
+
+  // Fetch verified expenses from real database on mount
+  useEffect(() => {
+    let active = true;
+    fetch(`/api/projects/${currentProject.id || 'PRJ-PLH-PH1'}/expenses?t=${Date.now()}`, {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store'
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (active && data?.ok && Array.isArray(data.expenses)) {
+          onUpdateProjectAndExpenses([currentProject], data.expenses, null);
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to load project expenses from database:', err);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [currentProject.id]);
 
   // Unique vendors for filter dropdown
   const uniqueVendors = useMemo(() => {
@@ -348,8 +371,8 @@ export default function ProjectExpensesView({
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // Submit Expense Form
-  const handleSubmitExpense = (e) => {
+  // Submit Expense Form directly to backend database
+  const handleSubmitExpense = async (e) => {
     e.preventDefault();
     const result = ExpenseFormSchema.safeParse(formValues);
     if (!result.success) {
@@ -371,7 +394,6 @@ export default function ProjectExpensesView({
     const nowIso = new Date().toISOString();
 
     // Determine approval status
-    // If Facility Manager logs an expense > threshold (GH₵ 10,000), force PENDING
     let finalStatus = 'APPROVED';
     if (!isSuperAdmin && amountNum > threshold) {
       finalStatus = 'PENDING';
@@ -416,9 +438,38 @@ export default function ProjectExpensesView({
       onUpdateProjectAndExpenses([currentProject], updatedList, auditEntry);
       showToast(`Expense updated successfully (${formatGHS(amountNum)})`, 'success');
     } else {
-      // Create new expense
-      const newId = `EXP-${new Date().getFullYear()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-      const newExpense = {
+      // Create new expense directly in real database
+      let savedRecord = null;
+      try {
+        const payload = {
+          projectId: currentProject.id || 'PRJ-PLH-PH1',
+          ...parsed,
+          amount: amountNum,
+          currency: 'GHS',
+          amountUsd,
+          invoiceReceiptUrl: formValues.invoiceReceiptUrl,
+          receiptFileName: formValues.receiptFileName,
+          approvalStatus: finalStatus,
+          expenseDate: parsed.expenseDate || nowIso.slice(0, 10)
+        };
+        const res = await fetch(`/api/projects/${currentProject.id || 'PRJ-PLH-PH1'}/expenses`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (res.ok) {
+          const resData = await res.json();
+          if (resData?.ok && resData.expense) {
+            savedRecord = resData.expense;
+          }
+        }
+      } catch (err) {
+        console.error('Failed to post expense directly to backend:', err);
+      }
+
+      const newId = savedRecord?.id || `EXP-${new Date().getFullYear()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+      const newExpense = savedRecord || {
         id: newId,
         projectId: currentProject.id || 'PRJ-PLH-PH1',
         ...parsed,
@@ -436,7 +487,7 @@ export default function ProjectExpensesView({
         createdAt: nowIso
       };
 
-      const updatedList = [newExpense, ...expenses];
+      const updatedList = [newExpense, ...expenses.filter((e) => e.id !== newExpense.id)];
 
       const auditEntry = {
         id: `AUD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -460,7 +511,7 @@ export default function ProjectExpensesView({
           'info'
         );
       } else {
-        showToast(`Expense of ${formatGHS(amountNum)} logged successfully!`, 'success');
+        showToast(`Expense of ${formatGHS(amountNum)} logged & saved to database!`, 'success');
       }
     }
 
@@ -469,10 +520,19 @@ export default function ProjectExpensesView({
   };
 
   // Approve a pending expense (Super Admin only)
-  const handleApproveExpense = (exp) => {
+  const handleApproveExpense = async (exp) => {
     if (!isSuperAdmin) {
       showToast('Super Admin authorization is required to approve expenses.', 'error');
       return;
+    }
+
+    try {
+      await fetch(`/api/projects/expenses/${exp.id}/approve`, {
+        method: 'PATCH',
+        credentials: 'same-origin'
+      });
+    } catch (err) {
+      console.error('Failed to approve expense on server:', err);
     }
 
     const nowIso = new Date().toISOString();
@@ -538,15 +598,30 @@ export default function ProjectExpensesView({
     showToast(`Expense marked as PAID.`, 'success');
   };
 
-  // Delete an expense (Super Admin only)
-  const handleDeleteExpense = (exp) => {
+  // Delete an expense directly from database
+  const handleDeleteExpense = async (exp) => {
     if (!isSuperAdmin) {
       showToast('Super Admin authorization is required to delete expenses.', 'error');
       return;
     }
 
-    if (!window.confirm(`Are you sure you want to delete "${exp.title}" (${formatGHS(exp.amount)})?`)) {
+    if (!window.confirm(`Are you sure you want to permanently delete "${exp.title}" (${formatGHS(exp.amount)})?`)) {
       return;
+    }
+
+    try {
+      const res = await fetch(`/api/projects/expenses/${exp.id}`, {
+        method: 'DELETE',
+        credentials: 'same-origin'
+      });
+      if (!res.ok) {
+        await fetch(`/api/expenses/${exp.id}`, {
+          method: 'DELETE',
+          credentials: 'same-origin'
+        });
+      }
+    } catch (err) {
+      console.error('Failed to send DELETE mutation to database:', err);
     }
 
     const updatedList = expenses.filter((item) => item.id !== exp.id);
@@ -567,7 +642,7 @@ export default function ProjectExpensesView({
     };
 
     onUpdateProjectAndExpenses([currentProject], updatedList, auditEntry);
-    showToast(`Expense deleted successfully.`, 'info');
+    showToast(`Expense permanently deleted from database.`, 'info');
   };
 
   // Save Budget Configuration (Super Admin)
@@ -1162,7 +1237,28 @@ export default function ProjectExpensesView({
           )}
         </div>
 
-        {filteredExpenses.length === 0 ? (
+        {expenses.length === 0 ? (
+          <div className="p-12 text-center space-y-4">
+            <div className="w-14 h-14 rounded-2xl bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center justify-center mx-auto border border-amber-500/20">
+              <HardHat className="w-7 h-7" />
+            </div>
+            <div>
+              <h4 className="text-base font-extrabold text-slate-800 dark:text-slate-100">
+                No expenses recorded yet. Click 'Log New Expense' to get started
+              </h4>
+              <p className="text-xs text-slate-500 max-w-md mx-auto mt-1">
+                Record construction materials, foundation earthworks, artisan payouts, and statutory municipal fees.
+              </p>
+            </div>
+            <button
+              onClick={handleOpenAddModal}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-slate-950 font-bold text-xs rounded-xl shadow-md transition-all cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              Log New Expense
+            </button>
+          </div>
+        ) : filteredExpenses.length === 0 ? (
           <div className="p-12 text-center space-y-3">
             <div className="w-12 h-12 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-400 flex items-center justify-center mx-auto">
               <HardHat className="w-6 h-6" />

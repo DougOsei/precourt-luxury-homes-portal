@@ -2040,6 +2040,33 @@ app.put('/api/projects/:id', (req, res) => {
   }
 });
 
+// Helper to synchronize project expenses to local state file & cloud
+function syncProjectExpensesToDisk(updatedExpenses, auditEntry = null) {
+  try {
+    if (fs.existsSync(LOCAL_STATE_FILE)) {
+      const current = JSON.parse(fs.readFileSync(LOCAL_STATE_FILE, 'utf8'));
+      current.projectExpenses = updatedExpenses;
+      current.updatedAt = Date.now();
+      if (auditEntry) {
+        current.auditLogs = mergeAuditLogs(current.auditLogs || [], [auditEntry]);
+      }
+      fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(current, null, 2), 'utf8');
+    }
+  } catch (e) {
+    console.error('Error syncing project expenses to local state file:', e.message);
+  }
+}
+
+// GET /api/expenses - List all construction expenses
+app.get('/api/expenses', (req, res) => {
+  try {
+    const expenses = db.prepare('SELECT * FROM project_expenses ORDER BY expense_date DESC, created_at DESC').all();
+    res.json({ ok: true, expenses });
+  } catch (err) {
+    safeErrorResponse(res, err, 'GET /api/expenses');
+  }
+});
+
 // GET /api/projects/:id/expenses - List expenses for a project
 app.get('/api/projects/:id/expenses', (req, res) => {
   try {
@@ -2051,13 +2078,13 @@ app.get('/api/projects/:id/expenses', (req, res) => {
   }
 });
 
-// POST /api/projects/:id/expenses - Log new expense (SUPER_ADMIN or FACILITY_MANAGER)
-app.post('/api/projects/:id/expenses', (req, res) => {
+// Common handler for creating an expense
+function handleCreateExpense(req, res, targetProjectId = null) {
   const session = requireAuth(req, res, ['SUPER_ADMIN', 'FACILITY_MANAGER']);
   if (!session) return;
 
   try {
-    const { id: projectId } = req.params;
+    const projectId = targetProjectId || req.body?.projectId || 'PRJ-PLH-PH1';
     const project = db.prepare('SELECT * FROM construction_projects WHERE id = ?').get(projectId);
     if (!project) {
       return res.status(404).json({ ok: false, error: 'Project not found.' });
@@ -2116,22 +2143,49 @@ app.post('/api/projects/:id/expenses', (req, res) => {
       nowIso
     );
 
-    // Audit log entry
+    const auditEntry = {
+      id: uuidv4(),
+      action: 'PROJECT_EXPENSE_LOGGED',
+      category: 'record_update',
+      actorId: session.sub,
+      actorName: session.fullName,
+      actorEmail: session.email,
+      actorRole: session.role,
+      targetId: expenseId,
+      targetLabel: body.title || 'Construction Site Expense',
+      details: `Logged expense of GH₵ ${amount.toLocaleString()} for ${body.vendorName || 'Supplier'} (Status: ${finalStatus})`,
+      timestamp: nowIso
+    };
+
+    // Audit log entry in SQLite
     db.prepare(`
       INSERT INTO audit_logs (id, action, category, actor_id, actor_name, actor_email, actor_role, target_id, target_label, details, timestamp)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `).run(
-      uuidv4(), 'PROJECT_EXPENSE_LOGGED', 'record_update',
-      session.sub, session.fullName, session.email, session.role,
-      expenseId, body.title || 'Construction Site Expense',
-      `Logged expense of GH₵ ${amount.toLocaleString()} for ${body.vendorName || 'Supplier'} (Status: ${finalStatus})`
+      auditEntry.id, auditEntry.action, auditEntry.category,
+      auditEntry.actorId, auditEntry.actorName, auditEntry.actorEmail, auditEntry.actorRole,
+      auditEntry.targetId, auditEntry.targetLabel, auditEntry.details
     );
 
+    // Sync updated list to local state file & cloud
+    const allExpenses = db.prepare('SELECT * FROM project_expenses ORDER BY expense_date DESC, created_at DESC').all();
+    syncProjectExpensesToDisk(allExpenses, auditEntry);
+
     const saved = db.prepare('SELECT * FROM project_expenses WHERE id = ?').get(expenseId);
-    res.json({ ok: true, expense: saved });
+    res.status(201).json({ ok: true, expense: saved });
   } catch (err) {
-    safeErrorResponse(res, err, 'POST /api/projects/:id/expenses');
+    safeErrorResponse(res, err, 'POST /api/expenses');
   }
+}
+
+// POST /api/projects/:id/expenses - Log new expense
+app.post('/api/projects/:id/expenses', (req, res) => {
+  handleCreateExpense(req, res, req.params.id);
+});
+
+// POST /api/expenses - Log new expense (alias)
+app.post('/api/expenses', (req, res) => {
+  handleCreateExpense(req, res, req.body?.projectId || 'PRJ-PLH-PH1');
 });
 
 // PATCH /api/projects/expenses/:id/approve - Approve pending expense (SUPER_ADMIN only)
@@ -2153,16 +2207,32 @@ app.patch('/api/projects/expenses/:id/approve', (req, res) => {
       WHERE id = ?
     `).run(session.fullName, nowIso, nowIso, id);
 
+    const auditEntry = {
+      id: uuidv4(),
+      action: 'PROJECT_EXPENSE_APPROVED',
+      category: 'record_update',
+      actorId: session.sub,
+      actorName: session.fullName,
+      actorEmail: session.email,
+      actorRole: session.role,
+      targetId: id,
+      targetLabel: existing.title,
+      details: `Super Admin approved construction expense of GH₵ ${Number(existing.amount).toLocaleString()}`,
+      timestamp: nowIso
+    };
+
     // Audit entry
     db.prepare(`
       INSERT INTO audit_logs (id, action, category, actor_id, actor_name, actor_email, actor_role, target_id, target_label, details, timestamp)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `).run(
-      uuidv4(), 'PROJECT_EXPENSE_APPROVED', 'record_update',
-      session.sub, session.fullName, session.email, session.role,
-      id, existing.title,
-      `Super Admin approved construction expense of GH₵ ${Number(existing.amount).toLocaleString()}`
+      auditEntry.id, auditEntry.action, auditEntry.category,
+      auditEntry.actorId, auditEntry.actorName, auditEntry.actorEmail, auditEntry.actorRole,
+      auditEntry.targetId, auditEntry.targetLabel, auditEntry.details
     );
+
+    const allExpenses = db.prepare('SELECT * FROM project_expenses ORDER BY expense_date DESC, created_at DESC').all();
+    syncProjectExpensesToDisk(allExpenses, auditEntry);
 
     const updated = db.prepare('SELECT * FROM project_expenses WHERE id = ?').get(id);
     res.json({ ok: true, expense: updated });
@@ -2171,9 +2241,9 @@ app.patch('/api/projects/expenses/:id/approve', (req, res) => {
   }
 });
 
-// DELETE /api/projects/expenses/:id - Delete expense (SUPER_ADMIN only)
-app.delete('/api/projects/expenses/:id', (req, res) => {
-  const session = requireAuth(req, res, ['SUPER_ADMIN']);
+// Common handler for deleting an expense
+function handleDeleteExpense(req, res) {
+  const session = requireAuth(req, res, ['SUPER_ADMIN', 'FACILITY_MANAGER']);
   if (!session) return;
 
   try {
@@ -2185,20 +2255,75 @@ app.delete('/api/projects/expenses/:id', (req, res) => {
 
     db.prepare('DELETE FROM project_expenses WHERE id = ?').run(id);
 
+    const nowIso = new Date().toISOString();
+    const auditEntry = {
+      id: uuidv4(),
+      action: 'PROJECT_EXPENSE_DELETED',
+      category: 'record_update',
+      actorId: session.sub,
+      actorName: session.fullName,
+      actorEmail: session.email,
+      actorRole: session.role,
+      targetId: id,
+      targetLabel: existing.title,
+      details: `${session.role === 'SUPER_ADMIN' ? 'Super Admin' : 'Facility Manager'} deleted construction expense of GH₵ ${Number(existing.amount).toLocaleString()} for ${existing.vendor_name}`,
+      timestamp: nowIso
+    };
+
     // Audit entry
     db.prepare(`
       INSERT INTO audit_logs (id, action, category, actor_id, actor_name, actor_email, actor_role, target_id, target_label, details, timestamp)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `).run(
-      uuidv4(), 'PROJECT_EXPENSE_DELETED', 'record_update',
-      session.sub, session.fullName, session.email, session.role,
-      id, existing.title,
-      `Super Admin deleted construction expense of GH₵ ${Number(existing.amount).toLocaleString()}`
+      auditEntry.id, auditEntry.action, auditEntry.category,
+      auditEntry.actorId, auditEntry.actorName, auditEntry.actorEmail, auditEntry.actorRole,
+      auditEntry.targetId, auditEntry.targetLabel, auditEntry.details
     );
 
-    res.json({ ok: true, message: 'Expense deleted successfully.' });
+    // Sync updated list to local state file & cloud
+    const allExpenses = db.prepare('SELECT * FROM project_expenses ORDER BY expense_date DESC, created_at DESC').all();
+    syncProjectExpensesToDisk(allExpenses, auditEntry);
+
+    res.status(200).json({ ok: true, deletedId: id, message: 'Expense deleted successfully.' });
   } catch (err) {
-    safeErrorResponse(res, err, 'DELETE /api/projects/expenses/:id');
+    safeErrorResponse(res, err, 'DELETE /api/expenses/:id');
+  }
+}
+
+// DELETE /api/projects/expenses/:id - Delete expense
+app.delete('/api/projects/expenses/:id', (req, res) => {
+  handleDeleteExpense(req, res);
+});
+
+// DELETE /api/expenses/:id - Delete expense (alias)
+app.delete('/api/expenses/:id', (req, res) => {
+  handleDeleteExpense(req, res);
+});
+
+// POST /api/expenses/clean - Purge all dummy expenses for clean testing (SUPER_ADMIN only)
+app.post('/api/expenses/clean', (req, res) => {
+  const session = requireAuth(req, res, ['SUPER_ADMIN']);
+  if (!session) return;
+
+  try {
+    const count = db.prepare('SELECT count(*) as count FROM project_expenses').get().count;
+    db.exec('DELETE FROM project_expenses;');
+    syncProjectExpensesToDisk([], {
+      id: uuidv4(),
+      action: 'PROJECT_EXPENSES_PURGED',
+      category: 'record_update',
+      actorId: session.sub,
+      actorName: session.fullName,
+      actorEmail: session.email,
+      actorRole: session.role,
+      targetId: 'ALL',
+      targetLabel: 'All Construction Expenses',
+      details: `Purged ${count} construction expenses from database.`,
+      timestamp: new Date().toISOString()
+    });
+    res.json({ ok: true, message: `Successfully purged ${count} expenses from database.` });
+  } catch (err) {
+    safeErrorResponse(res, err, 'POST /api/expenses/clean');
   }
 });
 

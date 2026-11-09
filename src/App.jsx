@@ -208,10 +208,10 @@ export default function App() {
       const saved = localStorage.getItem(STORAGE_KEY_PROJECT_EXPENSES);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) return parsed;
       }
     } catch (e) {}
-    return DEFAULT_PROJECT_EXPENSES;
+    return [];
   });
 
   // Track latest state in refs for cloud sync & polling
@@ -495,7 +495,7 @@ export default function App() {
               );
             } catch (e) {}
           }
-          if (Array.isArray(serverState.projectExpenses) && serverState.projectExpenses.length > 0) {
+          if (Array.isArray(serverState.projectExpenses)) {
             setProjectExpenses(serverState.projectExpenses);
             projectExpensesRef.current = serverState.projectExpenses;
             try {
